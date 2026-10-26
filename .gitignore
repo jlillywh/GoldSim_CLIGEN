@@ -1,0 +1,12 @@
+# Object and temp files
+*.o
+*.obj
+*.exp
+*.lib
+*.so
+*.exe
+cligen_test
+
+# OS files
+.DS_Store
+Thumbs.db
