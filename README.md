@@ -60,24 +60,27 @@ Built for hydrological, water resource, civil engineering, and environmental mod
 ## GoldSim Setup Guide
 
 1. **Place DLL**: Copy `CligenWeather.dll` into the directory containing your GoldSim model file (`.gsm`).
-2. **Define Baseline Parameters**:
-   Create 9 standard 1D Vector elements in GoldSim indexed by the built-in `Month` array label set (`Jan`..`Dec`):
-   * `P_WW[Month]`
-   * `P_WD[Month]`
-   * `Mean_P[Month]`
-   * `SD_P[Month]`
-   * `Skew_P[Month]`
-   * `Mean_Tmax[Month]`
-   * `SD_Tmax[Month]`
-   * `Mean_Tmin[Month]`
-   * `SD_Tmin[Month]`
+2. **Define Scalar Parameters**:
+   Create scalar elements in GoldSim (such as Data elements, Expression elements, or Lookup Tables) for each of the 9 climate parameters:
+   * `P_WW` &mdash; Daily wet-given-wet probability (scalar fraction)
+   * `P_WD` &mdash; Daily wet-given-dry probability (scalar fraction)
+   * `Mean_P` &mdash; Daily wet-day mean precipitation depth (scalar length: `in` or `mm`)
+   * `SD_P` &mdash; Daily precipitation standard deviation (scalar length: `in` or `mm`)
+   * `Skew_P` &mdash; Daily precipitation skewness coefficient (scalar fraction)
+   * `Mean_Tmax` &mdash; Daily mean maximum air temperature (scalar temperature: `&deg;F` or `&deg;C`)
+   * `SD_Tmax` &mdash; Daily maximum temperature standard deviation (scalar temp difference: `Fdeg` or `Cdeg`)
+   * `Mean_Tmin` &mdash; Daily mean minimum air temperature (scalar temperature: `&deg;F` or `&deg;C`)
+   * `SD_Tmin` &mdash; Daily minimum temperature standard deviation (scalar temp difference: `Fdeg` or `Cdeg`)
+
+   *(If your model uses monthly values, you can look them up by calendar month or day so the current scalar value for today is fed to the element.)*
+
 3. **Insert External Element**:
    * Right-click canvas &rarr; **Insert Element &rarr; Functions &rarr; External (DLL)**.
    * File Name: `CligenWeather.dll`
    * Function: `cligen_weather_step`
    * Calling Convention: `__cdecl`
 4. **Link Arguments**:
-   Link the 13 scalar inputs in order (e.g. `P_WW[Month]`, `Mean_Tmax[Month]`, etc.).
+   Link the 13 scalar inputs in order. Every single argument in the External element interface is a pure scalar value.
 5. **Run**:
    Run Monte Carlo simulations across any number of realizations. The DLL automatically reseeds reproducibly per realization.
 
