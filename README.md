@@ -8,17 +8,23 @@
 
 ---
 
-## Key Highlights
+## Why CLIGEN vs. WGEN?
 
-* **Zero External Dependencies**: Standard C++17 only. No Python shims, no DLL-to-Python marshaling, no external runtime files.
-* **Step-by-Step Scalar Interface**: GoldSim passes 13 scalar inputs at each daily timestep and receives 3 daily scalar outputs (`Precipitation`, `Tmax`, `Tmin`).
-* **Clean Unit Handling in GoldSim**: Because inputs are individual scalars, each parameter carries its native GoldSim dimension (`F` for temperature, `Fdeg` for temperature standard deviation, `in` or `mm` for precipitation) with **zero array dimensional conflicts**.
-* **Dynamic / Transient Climate Shifts**: Modeler can apply time-varying trends (e.g. warming offsets or shifting precipitation regimes) directly in GoldSim before passing daily parameters to the DLL.
-* **CLIGEN Physical Formulation**:
-  * Two-state first-order Markov chain for wet/dry day occurrence ($P(W|W)$ and $P(W|D)$).
-  * Pearson Type III skew distribution for daily precipitation depth via Wilson-Hilferty transformation.
-  * Bivariate normal distribution with cross-correlation ($r = 0.65$) and $\text{AR}(1)$ daily persistence ($\rho = 0.60$) for maximum and minimum temperatures.
-  * Evaporative cooling temperature depression on wet days.
+Both **CLIGEN** (USDA-ARS) and **WGEN** (Richardson & Wright) are established stochastic weather generators that share a first-order two-state Markov chain for wet/dry day transitions. However, CLIGEN was developed specifically to overcome three key limitations in WGEN:
+
+1. **Extreme Precipitation Tails (Pearson Type III vs. Gamma)**:
+   * **WGEN** samples daily precipitation depth from a 2-parameter Gamma or Exponential distribution. Because these distributions have exponentially thin tails and no skewness adjustment, WGEN systematically **underpredicts extreme storm depths** (25-year to 100-year events) by 20% to 50%.
+   * **CLIGEN** uses a 3-parameter **Pearson Type III distribution** via the Wilson-Hilferty transformation. By incorporating monthly skewness coefficients ($\text{Skew}_P$), CLIGEN accurately reproduces both everyday moderate rainfall and the heavy positive tails of extreme design storm events.
+
+2. **Native Hourly & Sub-Daily Disaggregation**:
+   * **WGEN** produces only daily totals and offers no native mechanism for storm duration or sub-daily intensities.
+   * **CLIGEN** includes built-in sub-daily disaggregation:
+     * **Storm Hyetographs**: Generates time-to-peak and peak intensity using a mass-conserving double-exponential storm profile.
+     * **Hourly Temperatures**: Uses the Parton & Logan (1981) diurnal profile (sinusoidal during daylight, exponential decay at night) keyed to daily $T_{\max}$ and $T_{\min}$.
+
+3. **Physically Conditioned Temperatures**:
+   * **WGEN** uses an unconditioned continuous autoregressive model that can occasionally produce runaway temperature extremes (e.g., $>55^\circ\text{C}$ / $130^\circ\text{F}$) over long Monte Carlo realizations.
+   * **CLIGEN** conditions temperature directly on wet/dry occurrence: on wet days, $T_{\max}$ is depressed to reflect cloud cover and evaporative cooling. Coupled with bivariate cross-correlation ($r = 0.65$) and lag-1 persistence ($\rho = 0.60$), it prevents runaway extremes while preserving day-to-day temperature memory.
 
 ---
 
