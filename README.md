@@ -4,7 +4,7 @@
 [![C++17](https://img.shields.io/badge/language-C%2B%2B17-orange.svg)](https://github.com/jlillywh/GoldSim_CLIGEN)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-[GoldSim](https://www.goldsim.com/Web/Home/) DLL `CligenWeather.dll` (compiled C++ Windows 64-bit). Links directly to GoldSim's External Element to run stochastic simulations of daily and hourly weather data.
+[GoldSim](https://www.goldsim.com/Web/Home/) DLL `CligenWeather.dll` links directly to GoldSim's External Element to run stochastic simulations of daily and hourly weather data.
 
 ---
 
