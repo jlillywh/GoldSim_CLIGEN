@@ -4,9 +4,9 @@
 [![C++17](https://img.shields.io/badge/language-C%2B%2B17-orange.svg)](https://github.com/jlillywh/GoldSim_CLIGEN)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A high-speed, native C++ compiled Windows 64-bit Dynamic Link Library (`CligenWeather.dll`) that links directly to **GoldSim External Elements**. It runs stochastic Monte Carlo climate realizations of precipitation and daily minimum and maximum air temperatures at runtime.
+A high-speed, native C++ compiled Windows 64-bit Dynamic Link Library (`CligenWeather.dll`) that links directly to [GoldSim](https://www.goldsim.com/Web/Home/) External Elements. It runs stochastic Monte Carlo climate realizations of precipitation and daily minimum and maximum air temperatures at runtime.
 
-Built for hydrological, water resource, civil engineering, and environmental models built in [GoldSim](https://www.goldsim.com/).
+Built for hydrological, water resource, civil engineering, and environmental models built in [GoldSim](https://www.goldsim.com/Web/Home/).
 
 ---
 
