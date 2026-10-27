@@ -4,7 +4,7 @@
 [![C++17](https://img.shields.io/badge/language-C%2B%2B17-orange.svg)](https://github.com/jlillywh/GoldSim_CLIGEN)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-[GoldSim](https://www.goldsim.com/Web/Home/) DLL `CligenWeather.dll` links directly to GoldSim's External Element to run stochastic simulations of daily and hourly weather data.
+[GoldSim](https://www.goldsim.com/Web/Home/) DLL `CligenWeather.dll` links directly to GoldSim's External Element to run stochastic simulations of daily weather data (precipitation, Tmax, and Tmin).
 
 ---
 
@@ -16,11 +16,9 @@ Both **CLIGEN** (USDA-ARS) and **WGEN** (Richardson & Wright) are established st
    * **WGEN** samples daily precipitation depth from a 2-parameter Gamma or Exponential distribution. Because these distributions have exponentially thin tails and no skewness adjustment, WGEN systematically **underpredicts extreme storm depths** (25-year to 100-year events) by 20% to 50%.
    * **CLIGEN** uses a 3-parameter **Pearson Type III distribution** via the Wilson-Hilferty transformation. By incorporating monthly skewness coefficients ($\text{Skew}_P$), CLIGEN accurately reproduces both everyday moderate rainfall and the heavy positive tails of extreme design storm events.
 
-2. **Native Hourly & Sub-Daily Disaggregation**:
-   * **WGEN** produces only daily totals and offers no native mechanism for storm duration or sub-daily intensities.
-   * **CLIGEN** includes built-in sub-daily disaggregation:
-     * **Storm Hyetographs**: Generates time-to-peak and peak intensity using a mass-conserving double-exponential storm profile.
-     * **Hourly Temperatures**: Uses the Parton & Logan (1981) diurnal profile (sinusoidal during daylight, exponential decay at night) keyed to daily $T_{\max}$ and $T_{\min}$.
+2. **Storm Patterning & Sub-Daily Mechanics**:
+   * **WGEN** produces only bulk daily totals without storm pattern parameterization.
+   * **CLIGEN** incorporates internal sub-daily mechanics developed for the USDA Water Erosion Prediction Project (WEPP), including time-to-peak and peak intensity modeling using a mass-conserving double-exponential profile, and diurnal temperature cycles conditioned on daily $T_{\max}$ and $T_{\min}$.
 
 3. **Physically Conditioned Temperatures**:
    * **WGEN** uses an unconditioned continuous autoregressive model that can occasionally produce runaway temperature extremes (e.g., $>55^\circ\text{C}$ / $130^\circ\text{F}$) over long Monte Carlo realizations.
