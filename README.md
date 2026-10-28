@@ -28,29 +28,46 @@ Both **CLIGEN** (USDA-ARS) and **WGEN** (Richardson & Wright) are established st
 
 ## Technical Interface Specification
 
-### External Element Export
-* **DLL Name**: `CligenWeather.dll`
-* **Exported Function**: `cligen_weather_step`
-* **Calling Convention**: `__cdecl` (Standard C)
+The DLL exports two entry points to accommodate either **smooth seasonal cubic spline interpolation** (passing 12-month arrays) or **direct daily scalar values**:
 
-### Inputs (`inargs` &mdash; 13 Scalars)
-| Index | Argument Name | GoldSim Type | Typical Unit | Description |
-| :---: | :--- | :--- | :--- | :--- |
-| `[0]` | `Simulation_Time` | Scalar Value | `day` | Elapsed simulation time (GoldSim `ETIME`) |
-| `[1]` | `Time_Step` | Scalar Value | `day` | Model timestep size (GoldSim `DT`, e.g. 1.0 day) |
-| `[2]` | `Realization` | Scalar Value | `-` | Current Monte Carlo realization (GoldSim `Realization`) |
-| `[3]` | `Units_Flag` | Scalar Value | `-` | `0` = Metric (mm, &deg;C), `1` = US Customary (in, &deg;F) |
-| `[4]` | `P_WW` | Scalar Value | `-` | Wet-day probability given yesterday was wet $P(W\|W)$ |
-| `[5]` | `P_WD` | Scalar Value | `-` | Wet-day probability given yesterday was dry $P(W\|D)$ |
-| `[6]` | `Mean_P` | Scalar Value | `in` or `mm` | Daily mean precipitation depth on wet days |
-| `[7]` | `SD_P` | Scalar Value | `in` or `mm` | Daily precipitation standard deviation |
-| `[8]` | `Skew_P` | Scalar Value | `-` | Daily precipitation skewness coefficient |
-| `[9]` | `Mean_Tmax` | Scalar Value | `&deg;F` or `&deg;C` | Daily mean maximum air temperature |
-| `[10]` | `SD_Tmax` | Scalar Value | `Fdeg` or `Cdeg` | Daily maximum temperature standard deviation |
-| `[11]` | `Mean_Tmin` | Scalar Value | `&deg;F` or `&deg;C` | Daily mean minimum air temperature |
-| `[12]` | `SD_Tmin` | Scalar Value | `Fdeg` or `Cdeg` | Daily minimum temperature standard deviation |
+### 1. Vector Spline Mode: `CligenWeather` or `cligen_weather_arrays` (Recommended)
+Passes the full 12-month climate tables to the DLL. The DLL fits a **periodic cubic spline** through each 12-month parameter cycle, eliminating artificial step-function jumps at month boundaries and maintaining continuous first and second derivatives across the year.
+
+* **Function Name**: `CligenWeather` (or `cligen_weather_arrays`)
+* **Calling Convention**: `__cdecl`
+* **Total GoldSim Input Arguments**: **112** (4 scalar controls + 9 vectors of 12 elements each)
+
+| Index Range | Argument Name | GoldSim Type | Description |
+| :---: | :--- | :--- | :--- |
+| `[0]` | `Simulation_Time` | Scalar Value (`day`) | Elapsed simulation time (GoldSim `ETIME`) |
+| `[1]` | `Time_Step` | Scalar Value (`day`) | Timestep duration (GoldSim `DT`, e.g. 1.0 day) |
+| `[2]` | `Realization` | Scalar Value (`-`) | Current Monte Carlo realization index |
+| `[3]` | `Units_Flag` | Scalar Value (`-`) | `0` = Metric (mm, &deg;C), `1` = US Customary (in, &deg;F) |
+| `[4..15]` | `PWW[12]` | 12-item Vector | Monthly $P(W\|W)$ wet-given-wet probabilities (Jan..Dec) |
+| `[16..27]` | `PWD[12]` | 12-item Vector | Monthly $P(W\|D)$ wet-given-dry probabilities (Jan..Dec) |
+| `[28..39]` | `Mean_P[12]` | 12-item Vector | Monthly wet-day mean precipitation depth (`mm` or `in`) |
+| `[40..51]` | `SD_P[12]` | 12-item Vector | Monthly daily precip standard deviation (`mm` or `in`) |
+| `[52..63]` | `Skew_P[12]` | 12-item Vector | Monthly daily precip skewness coefficient |
+| `[64..75]` | `Mean_Tmax[12]` | 12-item Vector | Monthly mean daily max air temperature (`&deg;C` or `&deg;F`) |
+| `[76..87]` | `SD_Tmax[12]` | 12-item Vector | Monthly max temp daily standard deviation (`Cdeg` or `Fdeg`) |
+| `[88..99]` | `Mean_Tmin[12]` | 12-item Vector | Monthly mean daily min air temperature (`&deg;C` or `&deg;F`) |
+| `[100..111]` | `SD_Tmin[12]` | 12-item Vector | Monthly min temp daily standard deviation (`Cdeg` or `Fdeg`) |
+
+> **Note on GoldSim Arguments:** When linking 9 vectors of dimension 12 alongside the 4 control scalars, GoldSim reports $4 + 9 \times 12 = 112$ scalar arguments to the external function. The DLL reconstructs day-of-year from `ETIME` and `DT` and evaluates each spline smoothly at mid-month coordinates.
+
+---
+
+### 2. Daily Scalar Mode: `cligen_weather_step`
+For models where you prefer to compute or lookup single daily scalar parameters directly inside GoldSim and pass only 13 scalars:
+
+* **Function Name**: `cligen_weather_step`
+* **Calling Convention**: `__cdecl`
+* **Total GoldSim Input Arguments**: **13** Scalars (`Simulation_Time`, `Time_Step`, `Realization`, `Units_Flag`, `P_WW`, `P_WD`, `Mean_P`, `SD_P`, `Skew_P`, `Mean_Tmax`, `SD_Tmax`, `Mean_Tmin`, `SD_Tmin`).
+
+---
 
 ### Outputs (`outargs` &mdash; 3 Scalars)
+Both entry points produce the same 3 daily output variables:
 | Index | Output Parameter | Units | Description |
 | :---: | :--- | :--- | :--- |
 | `[0]` | `Precip_Rate` | `in/day` or `mm/day` | Stochastic precipitation rate for the current timestep (`prcp / DT`) |
@@ -61,31 +78,18 @@ Both **CLIGEN** (USDA-ARS) and **WGEN** (Richardson & Wright) are established st
 
 ## GoldSim Setup Guide
 
-1. **Place DLL**: Copy `CligenWeather.dll` into the directory containing your GoldSim model file (`.gsm`).
-2. **Define Scalar Parameters**:
-   Create scalar elements in GoldSim (such as Data elements, Expression elements, or Lookup Tables) for each of the 9 climate parameters:
-   * `P_WW` &mdash; Daily wet-given-wet probability (scalar fraction)
-   * `P_WD` &mdash; Daily wet-given-dry probability (scalar fraction)
-   * `Mean_P` &mdash; Daily wet-day mean precipitation depth (scalar length: `in` or `mm`)
-   * `SD_P` &mdash; Daily precipitation standard deviation (scalar length: `in` or `mm`)
-   * `Skew_P` &mdash; Daily precipitation skewness coefficient (scalar fraction)
-   * `Mean_Tmax` &mdash; Daily mean maximum air temperature (scalar temperature: `&deg;F` or `&deg;C`)
-   * `SD_Tmax` &mdash; Daily maximum temperature standard deviation (scalar temp difference: `Fdeg` or `Cdeg`)
-   * `Mean_Tmin` &mdash; Daily mean minimum air temperature (scalar temperature: `&deg;F` or `&deg;C`)
-   * `SD_Tmin` &mdash; Daily minimum temperature standard deviation (scalar temp difference: `Fdeg` or `Cdeg`)
-
-   *(If your model uses monthly values, you can look them up by calendar month or day so the current scalar value for today is fed to the element.)*
-
-3. **Insert External Element**:
+1. **Place DLL**: Copy `CligenWeather.dll` into the folder containing your GoldSim model file (`.gsm`).
+2. **Insert External Element**:
    * Right-click canvas &rarr; **Insert Element &rarr; Functions &rarr; External (DLL)**.
-   * File Name: `CligenWeather.dll`
-   * Function: `cligen_weather_step`
-   * Calling Convention: `__cdecl`
-   * **Important (32-bit GoldSim / 64-bit DLL)**: If running 32-bit GoldSim with this 64-bit DLL, ensure the **"Run in separate process"** checkbox is checked on the External Element's Definition tab. Without this, GoldSim will report Windows Error Code 193 (`ERROR_BAD_EXE_FORMAT`) when attempting to load the 64-bit binary in-process.
-4. **Link Arguments**:
-   Link the 13 scalar inputs in order. Every single argument in the External element interface is a pure scalar value.
-5. **Run**:
-   Run Monte Carlo simulations across any number of realizations. The DLL automatically reseeds reproducibly per realization.
+   * **File Name**: `CligenWeather.dll`
+   * **Function**: `CligenWeather` (for 112-item monthly vector spline mode) or `cligen_weather_step` (for 13-item scalar mode).
+   * **Calling Convention**: `__cdecl`
+   * **Run in separate process**: Check the **"Run in separate process"** checkbox on the External Element's Definition tab. GoldSim uses 32-bit processes by default, and this option allows 32-bit GoldSim to run the 64-bit DLL via inter-process communication without Windows Error 193.
+3. **Link Arguments**:
+   * For **Vector Spline Mode**: Link `Simulation_Time`, `Time_Step`, `Realization`, `Units_Flag`, followed by the 9 monthly 12-item vectors in exact order.
+   * For **Scalar Mode**: Link the 4 control scalars and the 9 daily scalar values.
+4. **Run Simulation**:
+   Run Monte Carlo realizations. The DLL automatically detects new realizations and seeds each sequence independently.
 
 ---
 

@@ -5,12 +5,22 @@
 // This replaces legacy Python bridges with a high-performance native DLL.
 // There is NO Python runtime: GoldSim links directly to native C++ code.
 //
-// Exchange Pattern (STEP-BY-STEP SCALARS -- the only mode):
+// Exchange Pattern (STEP-BY-STEP, MONTHLY VECTORS IN -- the only mode):
 //   GoldSim evaluates the element on EVERY simulation timestep (DT = 1 day).
 //   On each call the DLL generates exactly ONE day of weather and returns
 //   three scalars: precipitation, daily maximum temperature and daily minimum
 //   temperature. There is NO lookup table and no full-run buffer -- the model
 //   and the generator march forward together, one day at a time.
+//
+//   The CLIGEN parameters are supplied as whole-year MONTHLY VECTORS: for each
+//   of the nine climate parameters GoldSim passes 12 values (Jan..Dec). The DLL
+//   fits a smooth periodic (seasonal) cubic spline through each set of 12
+//   monthly anchors and evaluates it at the current day-of-year, so a daily
+//   model sees a continuous seasonal signal rather than abrupt month-boundary
+//   steps -- all interpolation happens inside the DLL, not in the GoldSim model.
+//   GoldSim only needs to tell the element today's day-of-year (which it already
+//   knows from its calendar); if that input is left at 0 the DLL derives the
+//   day-of-year from elapsed simulation time assuming a 1-Jan start.
 //
 //   Because the generator is driven step by step, it MUST remember its own
 //   internal state between calls (the wet/dry chain, the day-to-day
@@ -19,9 +29,9 @@
 //   a new Monte Carlo realization the session detects the change and reseeds,
 //   so every realization is a fresh, independent weather sequence.
 //
-//   GoldSim may also feed time-varying CLIGEN parameters on each timestep
-//   (e.g. a warming trend applied to the monthly means), and the returned day
-//   simply reflects whatever parameters arrived for that step.
+//   A warming trend (or any climate drift) is applied by GoldSim evolving the
+//   monthly vectors it passes; the DLL simply rebuilds the seasonal curve when
+//   the incoming values change, so drift carries through automatically.
 //
 // Method IDs (GoldSim -> DLL):
 //   0  XF_INITIALIZE       set up the session
@@ -30,20 +40,23 @@
 //   3  XF_REP_ARGUMENTS    report input count and output count
 //   99 XF_CLEANUP          tear down
 //
-// Argument Contract (inargs - exactly 13 scalar values per timestep):
-//   [0] Simulation_Time   Elapsed simulation time in days (GoldSim ETIME)
-//   [1] Time_Step         Timestep size in days (GoldSim DT, default 1.0)
-//   [2] Realization       Current Monte Carlo realization index (GoldSim Realization)
-//   [3] Units_Flag        0 = Metric (mm, deg C), 1 = US Customary (in, deg F)
-//   [4] P_WW              Wet-day prob given yesterday wet P(W|W) (-)
-//   [5] P_WD              Wet-day prob given yesterday dry P(W|D) (-)
-//   [6] Mean_P            Mean daily precipitation depth on wet days (mm or in)
-//   [7] SD_P              Precipitation standard deviation (mm or in)
-//   [8] Skew_P            Precipitation skewness coefficient (-)
-//   [9] Mean_Tmax         Mean daily maximum air temperature (deg C or deg F)
-//   [10] SD_Tmax          Maximum temperature standard deviation (Cdeg or Fdeg)
-//   [11] Mean_Tmin        Mean daily minimum air temperature (deg C or deg F)
-//   [12] SD_Tmin          Minimum temperature standard deviation (Cdeg or Fdeg)
+// Argument Contract (inargs - exactly 112 values per timestep in CligenWeather / cligen_weather_arrays):
+//   [0]  Simulation_Time   Elapsed simulation time in days (GoldSim ETIME)
+//   [1]  Time_Step         Timestep size in days (GoldSim DT, default 1.0)
+//   [2]  Realization       Current Monte Carlo realization index (GoldSim Realization)
+//   [3]  Units_Flag        0 = Metric (mm, deg C), 1 = US Customary (in, deg F)
+//   Then nine contiguous 12-element monthly vectors (Jan..Dec in each block):
+//   [4..15]    P_WW[12]      Wet-day prob given yesterday wet P(W|W) (-)
+//   [16..27]   P_WD[12]      Wet-day prob given yesterday dry P(W|D) (-)
+//   [28..39]   Mean_P[12]    Mean daily precipitation depth on wet days (mm or in)
+//   [40..51]   SD_P[12]      Precipitation standard deviation (mm or in)
+//   [52..63]   Skew_P[12]    Precipitation skewness coefficient (-)
+//   [64..75]   Mean_Tmax[12] Mean daily maximum air temperature (deg C or deg F)
+//   [76..87]   SD_Tmax[12]   Maximum temperature standard deviation (Cdeg or Fdeg)
+//   [88..99]   Mean_Tmin[12] Mean daily minimum air temperature (deg C or deg F)
+//   [100..111] SD_Tmin[12]   Minimum temperature standard deviation (Cdeg or Fdeg)
+//
+// (Alternatively, cligen_weather_step accepts 13 scalar values for step-by-step models)
 //
 // Outputs Contract (outargs - exactly 3 scalar values updated each timestep):
 //   [0] Precip_Rate     Daily stochastic precipitation rate (mm/day or in/day, prcp / dt)
@@ -76,9 +89,22 @@ enum XFStatus {
     XF_FAILURE_WITH_MSG = -1
 };
 
-static constexpr int    NUM_STEP_INPUTS  = 13; // 4 controls + 5 precip + 4 temp scalars
 static constexpr int    NUM_STEP_OUTPUTS = 3;  // Precip, Tmax, Tmin
-static constexpr double DLL_VERSION      = 3.0;
+static constexpr double DLL_VERSION      = 4.0;
+
+// Input layout: 4 control scalars followed by nine 12-element monthly vectors (112 inputs total).
+static constexpr int    MONTHLY_BLOCK    = 12;
+static constexpr int    NUM_PARAM_BLOCKS = 9;   // PWW,PWD,MeanP,SDP,SkewP,MeanTmax,SDTmax,MeanTmin,SDTmin
+static constexpr int    OFF_MONTHLY      = 4;   // first monthly value sits at inargs[4]
+static constexpr int    NUM_ARRAY_INPUTS = OFF_MONTHLY + NUM_PARAM_BLOCKS * MONTHLY_BLOCK; // 112
+static constexpr int    NUM_STEP_INPUTS  = 13;
+
+// Start index of each monthly block within inargs.
+enum ParamBlock {
+    BLK_PWW = 0, BLK_PWD, BLK_MEANP, BLK_SDP, BLK_SKEWP,
+    BLK_MTMAX, BLK_SDTMAX, BLK_MTMIN, BLK_SDTMIN
+};
+static inline int block_offset(int blk) { return OFF_MONTHLY + blk * MONTHLY_BLOCK; }
 
 // ---------------------------------------------------------------------------
 // Persistent step-by-step session.
@@ -101,7 +127,7 @@ static std::string get_dll_directory() {
     HMODULE hm = NULL;
     if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCSTR)&detect_log_level, &hm)) {
+                           (LPCSTR)&get_dll_directory, &hm)) {
         if (GetModuleFileNameA(hm, path, sizeof(path)) > 0) {
             char* slash = strrchr(path, '\\');
             if (slash) *slash = '\0';
@@ -156,6 +182,9 @@ namespace {
         bool prev_wet = false;      // wet/dry Markov state carried from yesterday
         double res_tmax = 0.0;      // AR(1) max-temperature residual carried forward
         double res_tmin = 0.0;      // AR(1) min-temperature residual carried forward
+        // One seasonal cubic spline per CLIGEN parameter, rebuilt only when the
+        // incoming monthly vectors change (so steady runs pay the solve once).
+        cligen::MonthlyCubicSpline param_spline[NUM_PARAM_BLOCKS];
         std::mt19937_64 rng;
         std::normal_distribution<double> norm{0.0, 1.0};
         std::uniform_real_distribution<double> uni{0.0, 1.0};
@@ -226,9 +255,9 @@ namespace {
     StepSession g_step_session;
 }
 
-// Single standard GoldSim External entry point.
-GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
-                                     double* inargs, double* outargs) {
+// Common execution function supporting both 112-input vector spline mode and 13-input scalar mode.
+static void execute_cligen(bool array_mode, int methodID, int* status,
+                           double* inargs, double* outargs) {
     if (status) *status = XF_SUCCESS;
 
     switch (methodID) {
@@ -238,7 +267,8 @@ GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
         g_step_session.current_realization = -1;
         g_step_session.step_count = 0;
         if (g_step_session.log_file && g_step_session.log_level >= LOG_INFO) {
-            fprintf(g_step_session.log_file, "[CligenWeather] Session initialized.\n");
+            fprintf(g_step_session.log_file, "[CligenWeather] Session initialized (%s mode).\n",
+                array_mode ? "112-vector spline" : "13-scalar step");
             fflush(g_step_session.log_file);
         }
         break;
@@ -251,7 +281,7 @@ GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
 
     case XF_REP_ARGUMENTS: {
         if (outargs) {
-            outargs[0] = static_cast<double>(NUM_STEP_INPUTS);
+            outargs[0] = static_cast<double>(array_mode ? NUM_ARRAY_INPUTS : NUM_STEP_INPUTS);
             outargs[1] = static_cast<double>(NUM_STEP_OUTPUTS);
         }
         break;
@@ -266,29 +296,56 @@ GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
 
         const double etime     = inargs[0];
         const double dt        = (inargs[1] > 0.0) ? inargs[1] : 1.0;
-        (void)etime; (void)dt;
         const long   real_id   = (inargs[2] >= 1.0) ? static_cast<long>(inargs[2]) : 1;
         const int    units     = (inargs[3] >= 0.5) ? 1 : 0; // 0 = Metric, 1 = US Customary
 
-        // Carry state forward between days; reseed only when a NEW realization
-        // begins, giving each realization its own independent sequence.
+        // Carry state forward between days; reseed only when a NEW realization begins
         if (!g_step_session.initialized || g_step_session.current_realization != real_id) {
             g_step_session.open_log();
             g_step_session.initialized = true;
             g_step_session.reset_realization(real_id);
         }
 
-        // 13 scalar inputs passed directly from GoldSim on this timestep
-        double pww       = inargs[4];
-        double pwd       = inargs[5];
-        double prcp_mean = inargs[6];
-        double prcp_sd   = inargs[7];
-        double prcp_skew = inargs[8];
+        double pww, pwd, prcp_mean, prcp_sd, prcp_skew;
+        double mean_tmax, sd_tmax, mean_tmin, sd_tmin;
 
-        double mean_tmax = inargs[9];
-        double sd_tmax   = inargs[10];
-        double mean_tmin = inargs[11];
-        double sd_tmin   = inargs[12];
+        if (array_mode) {
+            // Derive day-of-year 1..365 from elapsed simulation time (etime / dt)
+            long day_idx = static_cast<long>(std::floor(etime / dt + 0.5));
+            if (day_idx < 0) day_idx = 0;
+            int doy = static_cast<int>((day_idx % 365) + 1);
+
+            // Refresh the seasonal splines from the monthly vectors and evaluate today's value
+            const double u = cligen::month_phase(doy);
+            double param[NUM_PARAM_BLOCKS];
+            for (int blk = 0; blk < NUM_PARAM_BLOCKS; ++blk) {
+                g_step_session.param_spline[blk].set(&inargs[block_offset(blk)]);
+                param[blk] = g_step_session.param_spline[blk].evaluate(u);
+            }
+
+            pww       = std::max(0.01, std::min(0.99, param[BLK_PWW]));
+            pwd       = std::max(0.01, std::min(0.99, param[BLK_PWD]));
+            prcp_mean = param[BLK_MEANP];
+            prcp_sd   = param[BLK_SDP];
+            prcp_skew = std::max(0.0, std::min(4.0, param[BLK_SKEWP]));
+
+            mean_tmax = param[BLK_MTMAX];
+            sd_tmax   = param[BLK_SDTMAX];
+            mean_tmin = param[BLK_MTMIN];
+            sd_tmin   = param[BLK_SDTMIN];
+        } else {
+            // Direct daily scalar inputs
+            pww       = inargs[4];
+            pwd       = inargs[5];
+            prcp_mean = inargs[6];
+            prcp_sd   = inargs[7];
+            prcp_skew = inargs[8];
+
+            mean_tmax = inargs[9];
+            sd_tmax   = inargs[10];
+            mean_tmin = inargs[11];
+            sd_tmin   = inargs[12];
+        }
 
         // Sanity floors on variances
         if (pww <= 0.0 && pwd <= 0.0) {
@@ -303,9 +360,9 @@ GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
         }
         const double min_t_sd = (units == 1) ? (cligen::MIN_TEMP_SD * 1.8) : cligen::MIN_TEMP_SD;
         const double min_p_sd = (units == 1) ? (cligen::MIN_PRCP_SD / 25.4) : cligen::MIN_PRCP_SD;
-        sd_tmax = std::max(min_t_sd, sd_tmax);
-        sd_tmin = std::max(min_t_sd, sd_tmin);
-        prcp_sd = std::max(min_p_sd, prcp_sd);
+        sd_tmax   = std::max(min_t_sd, sd_tmax);
+        sd_tmin   = std::max(min_t_sd, sd_tmin);
+        prcp_sd   = std::max(min_p_sd, prcp_sd);
         prcp_mean = std::max((units == 1 ? 0.001 : 0.01), prcp_mean);
         prcp_skew = std::min(4.0, std::max(0.0, prcp_skew));
 
@@ -378,8 +435,20 @@ GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
     }
 }
 
-// Alias entry point so both "CligenWeather" and "cligen_weather_step" work in GoldSim
+// Default entry point: 112 inputs (4 scalars + 9 vectors of 12) with cubic spline interpolation
+GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
+                                     double* inargs, double* outargs) {
+    execute_cligen(true, methodID, status, inargs, outargs);
+}
+
+// Explicit alias for 112-vector cubic spline mode
+GS_EXPORT void GS_CALL cligen_weather_arrays(int methodID, int* status,
+                                            double* inargs, double* outargs) {
+    execute_cligen(true, methodID, status, inargs, outargs);
+}
+
+// Step-by-step entry point: 13 daily scalar inputs
 GS_EXPORT void GS_CALL cligen_weather_step(int methodID, int* status,
                                            double* inargs, double* outargs) {
-    CligenWeather(methodID, status, inargs, outargs);
+    execute_cligen(false, methodID, status, inargs, outargs);
 }

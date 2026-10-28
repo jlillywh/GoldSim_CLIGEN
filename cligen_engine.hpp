@@ -74,6 +74,131 @@ inline void advance_calendar(int& year, int& month, int& day, int& doy) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Periodic (seasonal) cubic spline over the 12 monthly climate values.
+//
+// GoldSim now hands the generator a whole year of monthly values at once (one
+// number per calendar month). This builds a smooth seasonal curve through those
+// 12 anchor points and reads off the value for any given day, so a daily-step
+// model no longer sees abrupt jumps at month boundaries. Each monthly value is
+// treated as the climatological value at the CENTRE of its month, and the curve
+// wraps around the calendar (December flows smoothly back into January), so the
+// seasonal cycle has no seam. The interpolation is a true cubic spline with
+// continuous first and second derivatives (periodic end conditions).
+//
+// Internally the 12 knots sit at integer positions 0..11 with period 12 and
+// unit spacing; evaluate() takes a continuous "month-centre coordinate" u (see
+// month_phase() below for the day-of-year mapping).
+// ---------------------------------------------------------------------------
+class MonthlyCubicSpline {
+public:
+    MonthlyCubicSpline() {
+        for (int i = 0; i < 12; ++i) { y_[i] = 0.0; y2_[i] = 0.0; }
+        valid_ = false;
+    }
+
+    // Supply the 12 monthly anchor values (Jan..Dec). Cheap no-op if unchanged,
+    // so a model that holds parameters constant pays the solve cost only once,
+    // while a slowly drifting climate simply rebuilds the curve as values move.
+    void set(const double y[12]) {
+        if (valid_) {
+            bool same = true;
+            for (int i = 0; i < 12; ++i) { if (y_[i] != y[i]) { same = false; break; } }
+            if (same) return;
+        }
+        for (int i = 0; i < 12; ++i) y_[i] = y[i];
+        solve();
+        valid_ = true;
+    }
+
+    // Evaluate the seasonal curve at month-centre coordinate u (periodic, any
+    // real value; u = m lands exactly on month m's anchor value).
+    double evaluate(double u) const {
+        u -= 12.0 * std::floor(u / 12.0);          // wrap into [0, 12)
+        int i = static_cast<int>(std::floor(u));
+        if (i < 0) i = 0;
+        if (i > 11) i = 11;
+        const int ip1 = (i + 1) % 12;
+        const double t = u - i;                    // position within segment, [0,1)
+        const double a = 1.0 - t, b = t;           // unit spacing (h = 1)
+        return a * y_[i] + b * y_[ip1]
+             + ((a * a * a - a) * y2_[i] + (b * b * b - b) * y2_[ip1]) / 6.0;
+    }
+
+private:
+    double y_[12];   // monthly anchor values
+    double y2_[12];  // second derivatives at the knots
+    bool   valid_;
+
+    // Second derivatives for a periodic cubic spline on 12 equally spaced knots.
+    // With unit spacing the knot equations are, for every i (indices mod 12):
+    //   y2[i-1] + 4 y2[i] + y2[i+1] = 6 (y[i+1] - 2 y[i] + y[i-1])
+    // which is a symmetric circulant tridiagonal system (diagonal 4, off-diagonal
+    // 1, plus the two wrap-around corners). Solved with the standard cyclic /
+    // Sherman-Morrison reduction to two ordinary tridiagonal solves.
+    void solve() {
+        double rhs[12];
+        for (int i = 0; i < 12; ++i) {
+            const int im1 = (i + 11) % 12, ip1 = (i + 1) % 12;
+            rhs[i] = 6.0 * (y_[ip1] - 2.0 * y_[i] + y_[im1]);
+        }
+        solve_cyclic(4.0, 1.0, rhs, y2_);
+    }
+
+    // x solves the N=12 circulant tridiagonal system with constant diagonal
+    // `diag`, constant off-diagonals `off`, and corner entries `off` (periodic).
+    static void solve_cyclic(double diag, double off, const double d[12], double x[12]) {
+        const int N = 12;
+        const double gamma = -diag;                // avoids cancellation in bb[0]
+        double bb[12];
+        for (int i = 0; i < N; ++i) bb[i] = diag;
+        bb[0]     = diag - gamma;
+        bb[N - 1] = diag - off * off / gamma;
+
+        double y[12], q[12], u[12] = {0};
+        solve_tridiag(bb, off, d, y);              // T y = d
+        u[0] = gamma; u[N - 1] = off;
+        solve_tridiag(bb, off, u, q);              // T q = u
+
+        const double vy = y[0] + (off / gamma) * y[N - 1];
+        const double vq = q[0] + (off / gamma) * q[N - 1];
+        const double fact = vy / (1.0 + vq);
+        for (int i = 0; i < N; ++i) x[i] = y[i] - fact * q[i];
+    }
+
+    // Thomas algorithm for an N=12 tridiagonal system with diagonal bb[i] and
+    // constant sub/super-diagonal `off`.
+    static void solve_tridiag(const double bb[12], double off, const double d[12], double x[12]) {
+        const int N = 12;
+        double cp[12], dp[12];
+        cp[0] = off / bb[0];
+        dp[0] = d[0] / bb[0];
+        for (int i = 1; i < N; ++i) {
+            const double m = bb[i] - off * cp[i - 1];
+            cp[i] = off / m;
+            dp[i] = (d[i] - off * dp[i - 1]) / m;
+        }
+        x[N - 1] = dp[N - 1];
+        for (int i = N - 2; i >= 0; --i) x[i] = dp[i] - cp[i] * x[i + 1];
+    }
+};
+
+// Map a day-of-year (1..365) to the spline's month-centre coordinate, placing
+// each monthly anchor at the middle of its month and letting the ends wrap.
+inline double month_phase(int doy) {
+    if (doy < 1) doy = 1;
+    if (doy > 365) doy = 365;
+    int cum = 0, m = 0;
+    for (; m < 12; ++m) {
+        if (doy <= cum + DAYS_IN_MONTH[m]) break;
+        cum += DAYS_IN_MONTH[m];
+    }
+    if (m > 11) m = 11;
+    const int day_in_month = doy - cum;                  // 1..DAYS_IN_MONTH[m]
+    const double f = (day_in_month - 0.5) / DAYS_IN_MONTH[m]; // midpoint fraction 0..1
+    return m + (f - 0.5);                                 // m at mid-month; eval() wraps
+}
+
 // Full monthly USDA CLIGEN parameter set.
 struct Parameters {
     // 12 months x 5 columns: [P(W|W), P(W|D), Mean_P, SD_P, Skew_P]
@@ -226,172 +351,5 @@ private:
 
 // Aliased for backwards compatibility in existing headers
 using TemperatureEngine = CligenEngine;
-
-// --- Full-run output as one lookup table PER WEATHER VARIABLE --------------
-struct LookupTable {
-    int table_id = 0;                 // which variable (see WxTableId)
-    int table_dim = 2;
-    std::vector<double> row_labels;   // day index, strictly increasing
-    std::vector<double> col_labels;   // daily: variable codes; hourly: hour-of-day
-    std::vector<double> data;         // row-major: data[row*ncols + col]
-    int nrows = 0;
-    int ncols = 0;
-};
-
-// Column codes used in the DAILY temperature/precip tables.
-enum WxVar { WX_TMAX = 1, WX_TMIN = 2, WX_TMEAN = 3, WX_PRCP = 4 };
-enum WxTableId { TBL_TEMPERATURE = 1, TBL_PRECIP = 2 };
-enum StormMethod { STORM_CLIGEN_NATIVE = 0, STORM_METHOD_OF_FRAGMENTS = 1 };
-
-// --- CLIGEN Sub-Daily Disaggregation --------------------------------------
-inline double solve_decay_scale(double tp, double ip) {
-    const double target = 1.0 / std::max(1.0001, ip);
-    double lo = 1e-4, hi = 1e4;
-    auto f = [&](double c) {
-        return c * (2.0 - std::exp(-tp / c) - std::exp(-(1.0 - tp) / c));
-    };
-    for (int it = 0; it < 100; ++it) {
-        double mid = 0.5 * (lo + hi);
-        if (f(mid) < target) lo = mid; else hi = mid;
-    }
-    return 0.5 * (lo + hi);
-}
-
-inline double storm_cum_depth(double t, double P, double dur,
-                              double tp, double ip, double c) {
-    if (t <= 0.0)   return 0.0;
-    if (t >= dur)   return P;
-    const double Tp = tp * dur;
-    const double sc = c * dur;
-    const double i_p = ip * P / dur;
-    if (t <= Tp)
-        return i_p * sc * (std::exp(-(Tp - t) / sc) - std::exp(-Tp / sc));
-    const double Mr = i_p * sc * (1.0 - std::exp(-Tp / sc));
-    return Mr + i_p * sc * (1.0 - std::exp(-(t - Tp) / sc));
-}
-
-inline double diurnal_temp(double hod, double tmin, double tmax) {
-    constexpr double PI = 3.14159265358979323846;
-    const double sunrise = 6.0, sunset = 20.0;
-    const double daylen  = sunset - sunrise;
-    const double lag     = 1.5;
-    const double decay   = 2.2;
-    auto day_t = [&](double h) {
-        double arg = PI * (h - sunrise) / (daylen + 2.0 * lag);
-        return tmin + (tmax - tmin) * std::sin(arg);
-    };
-    if (hod >= sunrise && hod <= sunset) return day_t(hod);
-    const double tset     = day_t(sunset);
-    const double nightlen = 24.0 - daylen;
-    const double hs = (hod > sunset) ? (hod - sunset) : (hod + 24.0 - sunset);
-    return tmin + (tset - tmin) * std::exp(-decay * hs / nightlen);
-}
-
-// Generate full simulation realization matching GoldSim start date and duration.
-inline std::vector<LookupTable> generate_tables_cligen(
-    const Parameters& p, uint64_t seed,
-    int start_year, int start_month, int start_day,
-    long duration_days, long steps_per_day, int storm_method,
-    double warming_delta) {
-
-    if (storm_method != STORM_CLIGEN_NATIVE) storm_method = STORM_CLIGEN_NATIVE;
-    if (steps_per_day < 1) steps_per_day = 1;
-    if (duration_days < 1) duration_days = 365;
-    if (start_year < 1900) start_year = 2026;
-    if (start_month < 1 || start_month > 12) start_month = 1;
-    if (start_day < 1 || start_day > 31) start_day = 1;
-
-    const bool hourly = (steps_per_day > 1);
-    const double bin_hours = 24.0 / double(steps_per_day);
-
-    CligenEngine eng(p, seed);
-
-    LookupTable temp; temp.table_id = TBL_TEMPERATURE; temp.table_dim = 2;
-    LookupTable rain; rain.table_id = TBL_PRECIP;      rain.table_dim = 2;
-
-    if (!hourly) {
-        temp.col_labels = { double(WX_TMAX), double(WX_TMIN) };
-        rain.col_labels = { double(WX_PRCP) };
-    } else {
-        for (long h = 0; h < steps_per_day; ++h) {
-            temp.col_labels.push_back(static_cast<double>(h));
-            rain.col_labels.push_back(static_cast<double>(h));
-        }
-    }
-    temp.ncols = static_cast<int>(temp.col_labels.size());
-    rain.ncols = static_cast<int>(rain.col_labels.size());
-
-    int cur_year  = start_year;
-    int cur_month = start_month;
-    int cur_day   = start_day;
-    int cur_doy   = date_to_doy(cur_year, cur_month, cur_day);
-
-    for (long d = 1; d <= duration_days; ++d) {
-        DayResult r = eng.step(cur_month - 1, warming_delta);
-        temp.row_labels.push_back(static_cast<double>(d));
-        rain.row_labels.push_back(static_cast<double>(d));
-
-        if (!hourly) {
-            temp.data.push_back(r.tmax);
-            temp.data.push_back(r.tmin);
-            rain.data.push_back(r.prcp);
-        } else {
-            double c = 0.0;
-            bool has_storm = (r.prcp > 0.0 && r.storm_dur > 0.0);
-            if (has_storm) c = solve_decay_scale(r.storm_tp, r.storm_ip);
-            for (long h = 0; h < steps_per_day; ++h) {
-                double hod = bin_hours * (double(h) + 0.5);
-                temp.data.push_back(diurnal_temp(hod, r.tmin, r.tmax));
-
-                double depth = 0.0;
-                if (has_storm) {
-                    double a = std::max(bin_hours * double(h),       r.storm_start) - r.storm_start;
-                    double b = std::min(bin_hours * double(h + 1),   r.storm_start + r.storm_dur) - r.storm_start;
-                    if (b > a)
-                        depth = storm_cum_depth(b, r.prcp, r.storm_dur, r.storm_tp, r.storm_ip, c)
-                              - storm_cum_depth(a, r.prcp, r.storm_dur, r.storm_tp, r.storm_ip, c);
-                }
-                rain.data.push_back(std::max(0.0, depth));
-            }
-        }
-
-        advance_calendar(cur_year, cur_month, cur_day, cur_doy);
-    }
-
-    temp.nrows = static_cast<int>(temp.row_labels.size());
-    rain.nrows = static_cast<int>(rain.row_labels.size());
-    return { temp, rain };
-}
-
-// Backward-compatible overload for integer simulation years.
-inline std::vector<LookupTable> generate_tables(const Parameters& p, uint64_t seed,
-                                int num_years, int start_year,
-                                long steps_per_day, int storm_method,
-                                double warming_delta) {
-    long duration_days = std::max(1, num_years) * 365;
-    return generate_tables_cligen(p, seed, start_year, 1, 1, duration_days,
-                                  steps_per_day, storm_method, warming_delta);
-}
-
-// Flatten per-variable lookup tables into GoldSim contiguous outargs buffer.
-inline long pack_tables(const std::vector<LookupTable>& tables,
-                        double* outargs, long capacity) {
-    long need = 1;
-    for (const auto& t : tables)
-        need += 4 + t.nrows + t.ncols + (long)t.nrows * t.ncols;
-    if (!outargs || capacity < need) return -1;
-    long k = 0;
-    outargs[k++] = static_cast<double>(tables.size());
-    for (const auto& t : tables) {
-        outargs[k++] = t.table_id;
-        outargs[k++] = t.table_dim;
-        outargs[k++] = t.nrows;
-        outargs[k++] = t.ncols;
-        for (int i = 0; i < t.nrows; ++i) outargs[k++] = t.row_labels[i];
-        for (int j = 0; j < t.ncols; ++j) outargs[k++] = t.col_labels[j];
-        for (size_t i = 0; i < t.data.size(); ++i) outargs[k++] = t.data[i];
-    }
-    return k;
-}
 
 } // namespace cligen
