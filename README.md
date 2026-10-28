@@ -79,17 +79,20 @@ Both entry points produce the same 3 daily output variables:
 ## GoldSim Setup Guide
 
 1. **Place DLL**: Copy `CligenWeather.dll` into the folder containing your GoldSim model file (`.gsm`).
+   * **Standard 32-bit GoldSim (Fastest, In-Process)**: Use `CligenWeather.dll` (which is compiled for 32-bit x86). Leave **"Run in separate process" UNCHECKED** for direct in-process memory calls with zero IPC overhead.
+   * **64-bit GoldSim**: Use `CligenWeather_x64.dll` (or rename to `CligenWeather.dll`) in-process.
+   * **Cross-bitness (32-bit GoldSim loading 64-bit DLL)**: Check the **"Run in separate process"** checkbox on the Definition tab.
 2. **Insert External Element**:
    * Right-click canvas &rarr; **Insert Element &rarr; Functions &rarr; External (DLL)**.
    * **File Name**: `CligenWeather.dll`
    * **Function**: `CligenWeather` (for 112-item monthly vector spline mode) or `cligen_weather_step` (for 13-item scalar mode).
    * **Calling Convention**: `__cdecl`
-   * **Run in separate process**: Check the **"Run in separate process"** checkbox on the External Element's Definition tab. GoldSim uses 32-bit processes by default, and this option allows 32-bit GoldSim to run the 64-bit DLL via inter-process communication without Windows Error 193.
+   * **Run in separate process**: **Unchecked** (for maximum speed in 32-bit GoldSim).
 3. **Link Arguments**:
-   * For **Vector Spline Mode**: Link `Simulation_Time`, `Time_Step`, `Realization`, `Units_Flag`, followed by the 9 monthly 12-item vectors in exact order.
+   * For **Vector Spline Mode**: Link `DateTime` (or `ETime`), `Time_Step`, `Realization`, `Units_Flag`, followed by the 9 monthly 12-item vectors in exact order.
    * For **Scalar Mode**: Link the 4 control scalars and the 9 daily scalar values.
 4. **Run Simulation**:
-   Run Monte Carlo realizations. The DLL automatically detects new realizations and seeds each sequence independently.
+   Run Monte Carlo realizations. In-process execution runs in microseconds per timestep without inter-process communication delays.
 
 ---
 

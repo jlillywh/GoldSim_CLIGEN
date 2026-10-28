@@ -29,12 +29,23 @@ so: cligen_engine.so
 cligen_engine.so: $(ENGINE) $(HEADER)
 	$(CXX) $(CXXFLAGS) -shared -fPIC $(ENGINE) -o $@
 
-# Windows DLL for GoldSim. Use a MinGW toolchain, e.g.:
-#   make dll CXX=x86_64-w64-mingw32-g++
-# or build natively on Windows with the same source.
-dll: CligenWeather.dll
-CligenWeather.dll: $(ENGINE) $(HEADER)
-	$(CXX) $(CXXFLAGS) -shared $(ENGINE) -o $@ -static -Wl,--add-stdcall-alias
+# Windows DLLs for GoldSim:
+#   make dll32   build 32-bit DLL for standard 32-bit GoldSim (in-process, fastest)
+#   make dll64   build 64-bit DLL for 64-bit GoldSim
+#   make dll     build both
+CXX32 ?= i686-w64-mingw32-g++
+CXX64 ?= x86_64-w64-mingw32-g++
+
+dll: dll32 dll64
+
+dll32: CligenWeather_win32.dll
+CligenWeather_win32.dll: $(ENGINE) $(HEADER)
+	$(CXX32) -O3 -std=c++17 -Wall -shared $(ENGINE) -o $@ -static -Wl,--add-stdcall-alias
+	cp $@ CligenWeather.dll
+
+dll64: CligenWeather_x64.dll
+CligenWeather_x64.dll: $(ENGINE) $(HEADER)
+	$(CXX64) -O3 -std=c++17 -Wall -shared $(ENGINE) -o $@ -static -Wl,--add-stdcall-alias
 
 run: cligen_test
 	mkdir -p ../../../bridge_output
@@ -42,4 +53,4 @@ run: cligen_test
 	    --out ../../../bridge_output/cpp_sim_output.csv
 
 clean:
-	rm -f cligen_test cligen_engine.so CligenWeather.dll
+	rm -f cligen_test cligen_engine.so CligenWeather.dll CligenWeather_win32.dll CligenWeather_x64.dll
