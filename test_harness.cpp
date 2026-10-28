@@ -104,10 +104,10 @@ int main(int argc, char** argv) {
     tmax.reserve(ndays); tmin.reserve(ndays); tmean.reserve(ndays); prcp.reserve(ndays);
     int wet_days = 0;
 
-    // Input layout (must match goldsim_external.cpp): 5 control scalars followed
-    // by nine 12-element monthly vectors.
-    const int OFF_MONTHLY = 5;
-    const int NIN = OFF_MONTHLY + 9 * 12; // 113
+    // Input layout (must match goldsim_external.cpp): 4 control scalars followed
+    // by nine 12-element monthly vectors (112 inputs total).
+    const int OFF_MONTHLY = 4;
+    const int NIN = OFF_MONTHLY + 9 * 12; // 112
     std::vector<double> in(NIN, 0.0);
     double out[3] = {0};
 
@@ -136,7 +136,6 @@ int main(int argc, char** argv) {
         in[1] = 1.0;            // Time_Step (1 day)
         in[2] = seed;           // Realization (constant -> one continuous sequence)
         in[3] = 0.0;            // Units_Flag (0 = Metric, deg C / mm)
-        in[4] = (double)doy;    // Day_Of_Year -> drives the seasonal spline
 
         CligenWeather(XF_CALCULATE, &status, in.data(), out);
         if (status != 0) { fprintf(stderr, "CALCULATE failed on day %ld\n", d); return 2; }

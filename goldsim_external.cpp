@@ -382,8 +382,15 @@ static void execute_cligen(bool array_mode, int methodID, int* status,
         g_step_session.res_tmax = rho_ar1 * g_step_session.res_tmax + decay * z1;
         g_step_session.res_tmin = rho_ar1 * g_step_session.res_tmin + decay * z2;
 
-        const double t_dep = is_wet ? (units == 1 ? 3.6 : 2.0) : 0.0;
-        double tmax = mean_tmax - t_dep + sd_tmax * g_step_session.res_tmax;
+        // Wet/dry temperature conditioning: wet days are cooled relative to dry days
+        // while preserving the unconditional monthly mean (mean_tmax).
+        // Steady-state wet probability from the two-state Markov chain:
+        const double pw = std::max(0.01, std::min(0.99, pwd / std::max(0.01, 1.0 - pww + pwd)));
+        const double delta_t = (units == 1) ? 3.6 : 2.0;
+        // Dry days are raised by pw * delta_t; wet days are lowered by (1 - pw) * delta_t.
+        // Expected value: pw * (mean - (1-pw)*delta) + (1-pw) * (mean + pw*delta) == mean_tmax.
+        const double t_shift = is_wet ? (-(1.0 - pw) * delta_t) : (pw * delta_t);
+        double tmax = mean_tmax + t_shift + sd_tmax * g_step_session.res_tmax;
         double tmin = mean_tmin + sd_tmin * g_step_session.res_tmin;
         if (tmin > tmax) std::swap(tmin, tmax);
 
