@@ -94,12 +94,34 @@ namespace {
     struct StepSession {
         bool initialized = false;
         long current_realization = -1;
+        long step_count = 0;
         bool prev_wet = false;      // wet/dry Markov state carried from yesterday
         double res_tmax = 0.0;      // AR(1) max-temperature residual carried forward
         double res_tmin = 0.0;      // AR(1) min-temperature residual carried forward
         std::mt19937_64 rng;
         std::normal_distribution<double> norm{0.0, 1.0};
         std::uniform_real_distribution<double> uni{0.0, 1.0};
+        FILE* log_file = nullptr;
+
+        void open_log() {
+            if (!log_file) {
+                log_file = fopen("cligen_debug.log", "w");
+                if (log_file) {
+                    fprintf(log_file, "====================================================================================\n");
+                    fprintf(log_file, " CligenWeather.dll v%.1f Debug Log (GoldSim External Element)\n", DLL_VERSION);
+                    fprintf(log_file, "====================================================================================\n");
+                    fflush(log_file);
+                }
+            }
+        }
+
+        void close_log() {
+            if (log_file) {
+                fprintf(log_file, "[CligenWeather] Simulation finished. Total steps: %ld\n", step_count);
+                fclose(log_file);
+                log_file = nullptr;
+            }
+        }
 
         void reset_realization(long real_id) {
             current_realization = real_id;
@@ -109,6 +131,10 @@ namespace {
             prev_wet = false;
             res_tmax = 0.0;
             res_tmin = 0.0;
+            if (log_file) {
+                fprintf(log_file, "\n--- Realization %ld (Seed: %llu) ---\n", real_id, (unsigned long long)seed);
+                fflush(log_file);
+            }
         }
     };
 
@@ -122,8 +148,14 @@ GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
 
     switch (methodID) {
     case XF_INITIALIZE: {
+        g_step_session.open_log();
         g_step_session.initialized = true;
         g_step_session.current_realization = -1;
+        g_step_session.step_count = 0;
+        if (g_step_session.log_file) {
+            fprintf(g_step_session.log_file, "[CligenWeather] Session initialized.\n");
+            fflush(g_step_session.log_file);
+        }
         break;
     }
 
@@ -155,6 +187,7 @@ GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
         // Carry state forward between days; reseed only when a NEW realization
         // begins, giving each realization its own independent sequence.
         if (!g_step_session.initialized || g_step_session.current_realization != real_id) {
+            g_step_session.open_log();
             g_step_session.initialized = true;
             g_step_session.reset_realization(real_id);
         }
@@ -230,10 +263,25 @@ GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
         outargs[0] = (dt > 0.0) ? (prcp / dt) : prcp; // Precip_Rate (mm/day or in/day)
         outargs[1] = tmax;                            // Tmax
         outargs[2] = tmin;                            // Tmin
+
+        g_step_session.step_count++;
+        if (g_step_session.log_file) {
+            if (g_step_session.step_count <= 100 || (g_step_session.step_count % 365 == 0)) {
+                fprintf(g_step_session.log_file,
+                    "Step %5ld | ETIME=%6.1f d | Real=%ld | In: PWW=%.3f PWD=%.3f MP=%.3f SDP=%.3f Skew=%.2f MTmax=%.1f SDTmax=%.2f MTmin=%.1f SDTmin=%.2f | Out: Wet=%d Precip_Rate=%7.4f %s Tmax=%5.2f Tmin=%5.2f\n",
+                    g_step_session.step_count, etime, real_id,
+                    pww, pwd, prcp_mean, prcp_sd, prcp_skew,
+                    mean_tmax, sd_tmax, mean_tmin, sd_tmin,
+                    (is_wet ? 1 : 0), outargs[0], (units == 1 ? "in/d" : "mm/d"),
+                    outargs[1], outargs[2]);
+                fflush(g_step_session.log_file);
+            }
+        }
         break;
     }
 
     case XF_CLEANUP: {
+        g_step_session.close_log();
         g_step_session.initialized = false;
         break;
     }
