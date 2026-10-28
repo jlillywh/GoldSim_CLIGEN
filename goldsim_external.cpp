@@ -94,6 +94,26 @@ static constexpr double DLL_VERSION      = 3.0;
 #include <string>
 #include <cctype>
 
+#if defined(_WIN32)
+#include <windows.h>
+static std::string get_dll_directory() {
+    char path[MAX_PATH] = {0};
+    HMODULE hm = NULL;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)&detect_log_level, &hm)) {
+        if (GetModuleFileNameA(hm, path, sizeof(path)) > 0) {
+            char* slash = strrchr(path, '\\');
+            if (slash) *slash = '\0';
+            return std::string(path);
+        }
+    }
+    return std::string(".");
+}
+#else
+static std::string get_dll_directory() { return std::string("."); }
+#endif
+
 enum LogLevel {
     LOG_OFF   = 0,
     LOG_ERROR = 1,
@@ -112,8 +132,14 @@ inline LogLevel detect_log_level() {
         if (s == "ERROR" || s == "1") return LOG_ERROR;
         if (s == "OFF" || s == "NONE" || s == "0") return LOG_OFF;
     }
-    // 2. Check for presence of cligen_debug.txt flag in working directory
+    // 2. Check for presence of cligen_debug.txt flag in working directory or DLL directory
     FILE* fdbg = fopen("cligen_debug.txt", "r");
+    if (fdbg) {
+        fclose(fdbg);
+        return LOG_DEBUG;
+    }
+    std::string dll_dbg = get_dll_directory() + "\\cligen_debug.txt";
+    fdbg = fopen(dll_dbg.c_str(), "r");
     if (fdbg) {
         fclose(fdbg);
         return LOG_DEBUG;
@@ -135,14 +161,21 @@ namespace {
         std::uniform_real_distribution<double> uni{0.0, 1.0};
         LogLevel log_level = LOG_ERROR;
         FILE* log_file = nullptr;
+        std::string log_filepath;
 
         void open_log() {
             log_level = detect_log_level();
             if (log_level == LOG_OFF) return;
 
+            if (log_filepath.empty()) {
+                std::string dll_dir = get_dll_directory();
+                log_filepath = dll_dir + "\\cligen_debug.log";
+            }
+
             // Only create/open the file upfront if INFO or DEBUG is requested
             if (log_level >= LOG_INFO && !log_file) {
-                log_file = fopen("cligen_debug.log", "w");
+                log_file = fopen(log_filepath.c_str(), "w");
+                if (!log_file) log_file = fopen("cligen_debug.log", "w");
                 if (log_file) {
                     fprintf(log_file, "====================================================================================\n");
                     fprintf(log_file, " CligenWeather.dll v%.1f Log (Level: %s)\n", DLL_VERSION,
@@ -155,7 +188,10 @@ namespace {
 
         void log_error(const char* msg) {
             if (log_level < LOG_ERROR) return;
-            if (!log_file) log_file = fopen("cligen_debug.log", "a");
+            if (!log_file) {
+                if (!log_filepath.empty()) log_file = fopen(log_filepath.c_str(), "a");
+                if (!log_file) log_file = fopen("cligen_debug.log", "a");
+            }
             if (log_file) {
                 fprintf(log_file, "[ERROR] Step %ld: %s\n", step_count, msg);
                 fflush(log_file);
