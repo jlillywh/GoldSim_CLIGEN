@@ -294,7 +294,7 @@ static void execute_cligen(bool array_mode, int methodID, int* status,
             return;
         }
 
-        const double etime     = inargs[0];
+        const double time_val  = inargs[0]; // GoldSim DateTime run property (preferred) or ETIME
         const double dt        = (inargs[1] > 0.0) ? inargs[1] : 1.0;
         const long   real_id   = (inargs[2] >= 1.0) ? static_cast<long>(inargs[2]) : 1;
         const int    units     = (inargs[3] >= 0.5) ? 1 : 0; // 0 = Metric, 1 = US Customary
@@ -310,13 +310,22 @@ static void execute_cligen(bool array_mode, int methodID, int* status,
         double mean_tmax, sd_tmax, mean_tmin, sd_tmin;
 
         if (array_mode) {
-            // Derive day-of-year 1..365 from elapsed simulation time (etime / dt)
-            long day_idx = static_cast<long>(std::floor(etime / dt + 0.5));
-            if (day_idx < 0) day_idx = 0;
-            int doy = static_cast<int>((day_idx % 365) + 1);
+            int doy = 1;
+            bool leap = false;
+            if (time_val >= 10000.0) {
+                // GoldSim DateTime run property (OLE automation date, days since 1899-12-30)
+                int year = 0, month = 0, day = 0;
+                cligen::ole_to_date(time_val, year, month, day, doy);
+                leap = cligen::is_leap_year(year);
+            } else {
+                // Elapsed simulation time ETIME starting from day 0 (Jan 1)
+                long day_idx = static_cast<long>(std::floor(time_val / dt + 0.5));
+                if (day_idx < 0) day_idx = 0;
+                doy = static_cast<int>((day_idx % 365) + 1);
+            }
 
             // Refresh the seasonal splines from the monthly vectors and evaluate today's value
-            const double u = cligen::month_phase(doy);
+            const double u = cligen::month_phase(doy, leap);
             double param[NUM_PARAM_BLOCKS];
             for (int blk = 0; blk < NUM_PARAM_BLOCKS; ++blk) {
                 g_step_session.param_spline[blk].set(&inargs[block_offset(blk)]);
@@ -418,8 +427,8 @@ static void execute_cligen(bool array_mode, int methodID, int* status,
         if (g_step_session.log_file && g_step_session.log_level >= LOG_DEBUG) {
             if (g_step_session.step_count <= 100 || (g_step_session.step_count % 365 == 0)) {
                 fprintf(g_step_session.log_file,
-                    "Step %5ld | ETIME=%6.1f d | Real=%ld | In: PWW=%.3f PWD=%.3f MP=%.3f SDP=%.3f Skew=%.2f MTmax=%.1f SDTmax=%.2f MTmin=%.1f SDTmin=%.2f | Out: Wet=%d Precip_Rate=%7.4f %s Tmax=%5.2f Tmin=%5.2f\n",
-                    g_step_session.step_count, etime, real_id,
+                    "Step %5ld | Time=%6.1f | Real=%ld | In: PWW=%.3f PWD=%.3f MP=%.3f SDP=%.3f Skew=%.2f MTmax=%.1f SDTmax=%.2f MTmin=%.1f SDTmin=%.2f | Out: Wet=%d Precip_Rate=%7.4f %s Tmax=%5.2f Tmin=%5.2f\n",
+                    g_step_session.step_count, time_val, real_id,
                     pww, pwd, prcp_mean, prcp_sd, prcp_skew,
                     mean_tmax, sd_tmax, mean_tmin, sd_tmin,
                     (is_wet ? 1 : 0), outargs[0], (units == 1 ? "in/d" : "mm/d"),

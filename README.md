@@ -39,7 +39,7 @@ Passes the full 12-month climate tables to the DLL. The DLL fits a **periodic cu
 
 | Index Range | Argument Name | GoldSim Type | Description |
 | :---: | :--- | :--- | :--- |
-| `[0]` | `Simulation_Time` | Scalar Value (`day`) | Elapsed simulation time (GoldSim `ETIME`) |
+| `[0]` | `Simulation_Time` | Scalar Value (`day`) | GoldSim `DateTime` run property (preferred) or `ETIME` |
 | `[1]` | `Time_Step` | Scalar Value (`day`) | Timestep duration (GoldSim `DT`, e.g. 1.0 day) |
 | `[2]` | `Realization` | Scalar Value (`-`) | Current Monte Carlo realization index |
 | `[3]` | `Units_Flag` | Scalar Value (`-`) | `0` = Metric (mm, &deg;C), `1` = US Customary (in, &deg;F) |
@@ -53,7 +53,7 @@ Passes the full 12-month climate tables to the DLL. The DLL fits a **periodic cu
 | `[88..99]` | `Mean_Tmin[12]` | 12-item Vector | Monthly mean daily min air temperature (`&deg;C` or `&deg;F`) |
 | `[100..111]` | `SD_Tmin[12]` | 12-item Vector | Monthly min temp daily standard deviation (`Cdeg` or `Fdeg`) |
 
-> **Note on GoldSim Arguments:** When linking 9 vectors of dimension 12 alongside the 4 control scalars, GoldSim reports $4 + 9 \times 12 = 112$ scalar arguments to the external function. The DLL reconstructs day-of-year from `ETIME` and `DT` and evaluates each spline smoothly at mid-month coordinates.
+> **Note on Calendar Synchronization:** When you pass GoldSim's built-in `DateTime` run property (e.g. `Simulation \ Run Properties \ DateTime`) as argument `[0]`, the DLL automatically detects the calendar date, extracts the day-of-year (1..366), accounts for leap years, and evaluates the splines at the correct season regardless of whether your simulation starts in January, October, or any other month. If an elapsed time `ETIME` (starting from 0) is passed, the DLL falls back to starting at Day 1 (Jan 1).
 
 ---
 

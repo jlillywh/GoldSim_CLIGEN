@@ -74,6 +74,29 @@ inline void advance_calendar(int& year, int& month, int& day, int& doy) {
     }
 }
 
+// Convert OLE automation date (days since Dec 30, 1899, as used by GoldSim DateTime)
+// to Gregorian calendar (year, month 1..12, day 1..31, doy 1..366).
+inline void ole_to_date(double ole_days, int& year, int& month, int& day, int& doy) {
+    long jd = 2415019 + static_cast<long>(std::floor(ole_days + 1e-6));
+    long l = jd + 68569;
+    long n = (4 * l) / 146097;
+    l = l - (146097 * n + 3) / 4;
+    long i = (4000 * (l + 1)) / 1461001;
+    l = l - (1461 * i) / 4 + 31;
+    long j = (80 * l) / 2447;
+    day = static_cast<int>(l - (2447 * j) / 80);
+    l = j / 11;
+    month = static_cast<int>(j + 2 - (12 * l));
+    year = static_cast<int>(100 * (n - 49) + i + l);
+
+    bool leap = is_leap_year(year);
+    const int* days = leap ? DAYS_IN_MONTH_LEAP : DAYS_IN_MONTH;
+    doy = day;
+    for (int m = 0; m < month - 1; ++m) {
+        doy += days[m];
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Periodic (seasonal) cubic spline over the 12 monthly climate values.
 //
@@ -183,19 +206,21 @@ private:
     }
 };
 
-// Map a day-of-year (1..365) to the spline's month-centre coordinate, placing
+// Map a day-of-year (1..365 or 366) to the spline's month-centre coordinate, placing
 // each monthly anchor at the middle of its month and letting the ends wrap.
-inline double month_phase(int doy) {
+inline double month_phase(int doy, bool leap = false) {
+    const int* days = leap ? DAYS_IN_MONTH_LEAP : DAYS_IN_MONTH;
+    const int max_doy = leap ? 366 : 365;
     if (doy < 1) doy = 1;
-    if (doy > 365) doy = 365;
+    if (doy > max_doy) doy = max_doy;
     int cum = 0, m = 0;
     for (; m < 12; ++m) {
-        if (doy <= cum + DAYS_IN_MONTH[m]) break;
-        cum += DAYS_IN_MONTH[m];
+        if (doy <= cum + days[m]) break;
+        cum += days[m];
     }
     if (m > 11) m = 11;
-    const int day_in_month = doy - cum;                  // 1..DAYS_IN_MONTH[m]
-    const double f = (day_in_month - 0.5) / DAYS_IN_MONTH[m]; // midpoint fraction 0..1
+    const int day_in_month = doy - cum;                  // 1..days[m]
+    const double f = (day_in_month - 0.5) / days[m];     // midpoint fraction 0..1
     return m + (f - 0.5);                                 // m at mid-month; eval() wraps
 }
 
