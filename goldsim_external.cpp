@@ -291,3 +291,9 @@ GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
         break;
     }
 }
+
+// Alias entry point so both "CligenWeather" and "cligen_weather_step" work in GoldSim
+GS_EXPORT void GS_CALL cligen_weather_step(int methodID, int* status,
+                                           double* inargs, double* outargs) {
+    CligenWeather(methodID, status, inargs, outargs);
+}
