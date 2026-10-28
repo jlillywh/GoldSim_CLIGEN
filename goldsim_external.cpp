@@ -90,11 +90,28 @@ enum XFStatus {
 };
 
 static constexpr int    NUM_STEP_OUTPUTS = 3;  // Precip, Tmax, Tmin
-static constexpr double DLL_VERSION      = 4.0;
+static constexpr int    NUM_TS_OUTPUTS   = 3;  // Precip_Rate, Tmax, Tmin Time Series
+static constexpr double DLL_VERSION      = 5.0;
 
-// Input layout: 4 control scalars followed by nine 12-element monthly vectors (112 inputs total).
+// GoldSim Time Series Definition protocol constants:
+static constexpr int    EXTERNAL_TIMESERIES_DATA_ID = 20;
+static constexpr int    EXTERNAL_TIMESERIES_VERSION = -3;
+static int              g_ts_output_buffer_size     = 500000; // default buffer allocation in doubles
+
+// Input layout for Time Series mode:
+// 5 control scalars followed by nine 12-element monthly vectors (113 inputs total).
+//   [0] Start_Time   (GoldSim StartTime / DateTime, OLE date double, e.g. 46296.0)
+//   [1] Sim_Dur      (GoldSim SimDuration, days, e.g. 365.0)
+//   [2] Time_Step    (GoldSim TimestepLength, days, e.g. 1.0)
+//   [3] Realization  (GoldSim Realization, 1, 2, 3...)
+//   [4] Units_Flag   (0 = Metric mm, deg C; 1 = US Customary in, deg F)
+//   [5..112] 9 monthly vectors of 12 items
 static constexpr int    MONTHLY_BLOCK    = 12;
 static constexpr int    NUM_PARAM_BLOCKS = 9;   // PWW,PWD,MeanP,SDP,SkewP,MeanTmax,SDTmax,MeanTmin,SDTmin
+static constexpr int    OFF_TS_MONTHLY   = 5;   // first monthly value sits at inargs[5]
+static constexpr int    NUM_TS_INPUTS    = OFF_TS_MONTHLY + NUM_PARAM_BLOCKS * MONTHLY_BLOCK; // 113
+
+// Input layout for legacy step-by-step array mode (112 inputs total):
 static constexpr int    OFF_MONTHLY      = 4;   // first monthly value sits at inargs[4]
 static constexpr int    NUM_ARRAY_INPUTS = OFF_MONTHLY + NUM_PARAM_BLOCKS * MONTHLY_BLOCK; // 112
 static constexpr int    NUM_STEP_INPUTS  = 13;
@@ -104,7 +121,8 @@ enum ParamBlock {
     BLK_PWW = 0, BLK_PWD, BLK_MEANP, BLK_SDP, BLK_SKEWP,
     BLK_MTMAX, BLK_SDTMAX, BLK_MTMIN, BLK_SDTMIN
 };
-static inline int block_offset(int blk) { return OFF_MONTHLY + blk * MONTHLY_BLOCK; }
+static inline int block_offset_step(int blk) { return OFF_MONTHLY + blk * MONTHLY_BLOCK; }
+static inline int block_offset_ts(int blk)   { return OFF_TS_MONTHLY + blk * MONTHLY_BLOCK; }
 
 // ---------------------------------------------------------------------------
 // Persistent step-by-step session.
@@ -328,7 +346,7 @@ static void execute_cligen(bool array_mode, int methodID, int* status,
             const double u = cligen::month_phase(doy, leap);
             double param[NUM_PARAM_BLOCKS];
             for (int blk = 0; blk < NUM_PARAM_BLOCKS; ++blk) {
-                g_step_session.param_spline[blk].set(&inargs[block_offset(blk)]);
+                g_step_session.param_spline[blk].set(&inargs[block_offset_step(blk)]);
                 param[blk] = g_step_session.param_spline[blk].evaluate(u);
             }
 
@@ -451,19 +469,277 @@ static void execute_cligen(bool array_mode, int methodID, int* status,
     }
 }
 
-// Default entry point: 112 inputs (4 scalars + 9 vectors of 12) with cubic spline interpolation
-GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
-                                     double* inargs, double* outargs) {
-    execute_cligen(true, methodID, status, inargs, outargs);
+// ---------------------------------------------------------------------------
+// Time Series Generation Mode (GoldSim Time Series Definition protocol):
+// ---------------------------------------------------------------------------
+// GoldSim evaluates this external function ONCE per realization.
+// It generates the full synthetic weather sequence from Start_Time to
+// (Start_Time + Sim_Dur) and returns three complete Time Series Definitions:
+//   [0] Precip_Rate (mm/d or in/d, instantaneous values)
+//   [1] Tmax        (deg C or deg F, instantaneous values)
+//   [2] Tmin        (deg C or deg F, instantaneous values)
+//
+// Format for each scalar time series returned to GoldSim:
+//   dest[0] = 20.0; // EXTERNAL_TIMESERIES_DATA_ID = 20
+//   dest[1] = -3.0; // EXTERNAL_TIMESERIES_VERSION = -3
+//   dest[2] = 1.0;  // 1 = Calendar time basis (OLE Julian date)
+//   dest[3] = 0.0;  // 0 = Instantaneous values (interpolated by GoldSim)
+//   dest[4] = 0.0;  // 0 rows (scalar)
+//   dest[5] = 0.0;  // 0 cols (scalar)
+//   dest[6] = 1.0;  // 1 series
+//   dest[7] = num_points;
+//   dest[8 .. 8+num_points-1] = timestamps (calendar dates: start_time + k*dt)
+//   dest[8+num_points .. 8+2*num_points-1] = values
+// ---------------------------------------------------------------------------
+#include <cstring>
+#include <numeric>
+
+static inline void write_time_series_record(
+    double* dest,
+    int time_basis,     // 1 = Calendar, 0 = Elapsed
+    int data_type,      // 0 = Instantaneous, 1 = Constant next
+    int num_points,
+    const double* timestamps,
+    const double* values)
+{
+    dest[0] = static_cast<double>(EXTERNAL_TIMESERIES_DATA_ID); // 20.0
+    dest[1] = static_cast<double>(EXTERNAL_TIMESERIES_VERSION); // -3.0
+    dest[2] = static_cast<double>(time_basis); // 1.0
+    dest[3] = static_cast<double>(data_type);  // 0.0
+    dest[4] = 0.0;
+    dest[5] = 0.0;
+    dest[6] = 1.0;
+    dest[7] = static_cast<double>(num_points);
+    std::memcpy(&dest[8], timestamps, num_points * sizeof(double));
+    std::memcpy(&dest[8 + num_points], values, num_points * sizeof(double));
 }
 
-// Explicit alias for 112-vector cubic spline mode
+static void execute_cligen_timeseries(int methodID, int* status,
+                                      double* inargs, double* outargs) {
+    if (status) *status = XF_SUCCESS;
+
+    switch (methodID) {
+    case XF_INITIALIZE: {
+        g_step_session.open_log();
+        g_step_session.initialized = true;
+        g_step_session.current_realization = -1;
+        g_step_session.step_count = 0;
+        if (g_step_session.log_file && g_step_session.log_level >= LOG_INFO) {
+            fprintf(g_step_session.log_file, "[CligenWeather] Time Series Generator initialized.\n");
+            fflush(g_step_session.log_file);
+        }
+        break;
+    }
+
+    case XF_REP_VERSION: {
+        if (outargs) outargs[0] = DLL_VERSION;
+        break;
+    }
+
+    case XF_REP_ARGUMENTS: {
+        if (outargs) {
+            outargs[0] = static_cast<double>(NUM_TS_INPUTS); // 113 inputs
+            outargs[1] = static_cast<double>(g_ts_output_buffer_size); // 500,000 doubles initial buffer
+        }
+        break;
+    }
+
+    case XF_CALCULATE: {
+        if (!inargs || !outargs) {
+            g_step_session.log_error("Null inargs or outargs pointer passed by GoldSim");
+            if (status) *status = XF_FAILURE;
+            return;
+        }
+
+        const double start_time = inargs[0]; // GoldSim StartTime / DateTime run property
+        const double sim_dur    = (inargs[1] > 0.0) ? inargs[1] : 1.0;
+        const double dt         = (inargs[2] > 0.0) ? inargs[2] : 1.0;
+        const long   real_id    = (inargs[3] >= 1.0) ? static_cast<long>(std::round(inargs[3])) : 1;
+        const int    units      = (inargs[4] >= 0.5) ? 1 : 0; // 0 = Metric, 1 = US Customary
+
+        int num_steps = static_cast<int>(std::round(sim_dur / dt));
+        if (num_steps < 1) num_steps = 1;
+        int num_points = num_steps + 1; // from start_time to start_time + sim_dur inclusive
+
+        int single_ts_size = 8 + 2 * num_points;
+        int total_req_size = NUM_TS_OUTPUTS * single_ts_size;
+
+        if (total_req_size > g_ts_output_buffer_size) {
+            outargs[0] = static_cast<double>(total_req_size);
+            g_ts_output_buffer_size = total_req_size;
+            if (status) *status = -2; // XF_INCREASE_MEMORY
+            return;
+        }
+
+        // Initialize realization RNG
+        g_step_session.open_log();
+        g_step_session.initialized = true;
+        g_step_session.reset_realization(real_id);
+
+        // Build seasonal splines from the 9 monthly vectors
+        cligen::MonthlyCubicSpline param_spline[NUM_PARAM_BLOCKS];
+        for (int blk = 0; blk < NUM_PARAM_BLOCKS; ++blk) {
+            param_spline[blk].set(&inargs[block_offset_ts(blk)]);
+        }
+
+        std::vector<double> ts_times(num_points);
+        std::vector<double> ts_prcp(num_points);
+        std::vector<double> ts_tmax(num_points);
+        std::vector<double> ts_tmin(num_points);
+
+        bool prev_wet = false;
+        double res_tmax = 0.0;
+        double res_tmin = 0.0;
+
+        for (int k = 0; k < num_points; ++k) {
+            double cur_time = start_time + k * dt;
+            ts_times[k] = cur_time;
+
+            int doy = 1;
+            bool leap = false;
+            if (cur_time >= 10000.0) {
+                int year = 0, month = 0, day = 0;
+                cligen::ole_to_date(cur_time, year, month, day, doy);
+                leap = cligen::is_leap_year(year);
+            } else {
+                long day_idx = static_cast<long>(std::floor(cur_time / dt + 0.5));
+                if (day_idx < 0) day_idx = 0;
+                doy = static_cast<int>((day_idx % 365) + 1);
+            }
+
+            const double u = cligen::month_phase(doy, leap);
+            double param[NUM_PARAM_BLOCKS];
+            for (int blk = 0; blk < NUM_PARAM_BLOCKS; ++blk) {
+                param[blk] = param_spline[blk].evaluate(u);
+            }
+
+            double pww       = std::max(0.01, std::min(0.99, param[BLK_PWW]));
+            double pwd       = std::max(0.01, std::min(0.99, param[BLK_PWD]));
+            double prcp_mean = param[BLK_MEANP];
+            double prcp_sd   = param[BLK_SDP];
+            double prcp_skew = std::max(0.0, std::min(4.0, param[BLK_SKEWP]));
+
+            double mean_tmax = param[BLK_MTMAX];
+            double sd_tmax   = param[BLK_SDTMAX];
+            double mean_tmin = param[BLK_MTMIN];
+            double sd_tmin   = param[BLK_SDTMIN];
+
+            if (pww <= 0.0 && pwd <= 0.0) {
+                pww = 0.45; pwd = 0.20;
+                prcp_mean = (units == 1) ? 0.25 : 6.0;
+                prcp_sd   = (units == 1) ? 0.30 : 7.0;
+                prcp_skew = 2.0;
+                mean_tmax = (units == 1) ? 68.0 : 20.0;
+                sd_tmax   = (units == 1) ? 7.2  : 4.0;
+                mean_tmin = (units == 1) ? 50.0 : 10.0;
+                sd_tmin   = (units == 1) ? 6.3  : 3.5;
+            }
+            const double min_t_sd = (units == 1) ? (cligen::MIN_TEMP_SD * 1.8) : cligen::MIN_TEMP_SD;
+            const double min_p_sd = (units == 1) ? (cligen::MIN_PRCP_SD / 25.4) : cligen::MIN_PRCP_SD;
+            sd_tmax   = std::max(min_t_sd, sd_tmax);
+            sd_tmin   = std::max(min_t_sd, sd_tmin);
+            prcp_sd   = std::max(min_p_sd, prcp_sd);
+            prcp_mean = std::max((units == 1 ? 0.001 : 0.01), prcp_mean);
+            prcp_skew = std::min(4.0, std::max(0.0, prcp_skew));
+
+            // 1. Wet/Dry Markov chain occurrence
+            double p_trans = prev_wet ? pww : pwd;
+            bool is_wet = g_step_session.uni(g_step_session.rng) < p_trans;
+            prev_wet = is_wet;
+
+            // 2. Temperature residuals (Matalas AR(1))
+            constexpr double r_cross = 0.65;
+            constexpr double rho_ar1 = 0.60;
+            const double z1 = g_step_session.norm(g_step_session.rng);
+            const double z_ind = g_step_session.norm(g_step_session.rng);
+            const double z2 = r_cross * z1 + std::sqrt(1.0 - r_cross * r_cross) * z_ind;
+
+            const double decay = std::sqrt(1.0 - rho_ar1 * rho_ar1);
+            res_tmax = rho_ar1 * res_tmax + decay * z1;
+            res_tmin = rho_ar1 * res_tmin + decay * z2;
+
+            const double pw = std::max(0.01, std::min(0.99, pwd / std::max(0.01, 1.0 - pww + pwd)));
+            const double delta_t = (units == 1) ? 3.6 : 2.0;
+            const double t_shift = is_wet ? (-(1.0 - pw) * delta_t) : (pw * delta_t);
+            double tmax = mean_tmax + t_shift + sd_tmax * res_tmax;
+            double tmin = mean_tmin + sd_tmin * res_tmin;
+            if (tmin > tmax) std::swap(tmin, tmax);
+
+            // 3. Precipitation depth (Pearson Type III via Wilson-Hilferty transformation)
+            double prcp = 0.0;
+            if (is_wet) {
+                const double z = g_step_session.norm(g_step_session.rng);
+                if (std::fabs(prcp_skew) < 1e-4) {
+                    prcp = prcp_mean + prcp_sd * z;
+                } else {
+                    const double inner = 1.0 + (prcp_skew * z) / 6.0 - (prcp_skew * prcp_skew) / 36.0;
+                    prcp = prcp_mean + prcp_sd * (2.0 / prcp_skew) * (inner * inner * inner - 1.0);
+                }
+                const double min_prcp = (units == 1) ? 0.004 : 0.1;
+                const double round_factor = (units == 1) ? 10000.0 : 1000.0;
+                prcp = std::max(min_prcp, std::round(prcp * round_factor) / round_factor);
+            }
+
+            ts_prcp[k] = (dt > 0.0) ? (prcp / dt) : prcp; // mm/d or in/d
+            ts_tmax[k] = tmax;                            // deg C or deg F
+            ts_tmin[k] = tmin;                            // deg C or deg F
+        }
+
+        // Package and write the 3 Time Series Definitions into outargs
+        // Output 1: Precip_Rate (instantaneous)
+        write_time_series_record(&outargs[0], 1, 0, num_points, ts_times.data(), ts_prcp.data());
+        // Output 2: Tmax (instantaneous)
+        write_time_series_record(&outargs[single_ts_size], 1, 0, num_points, ts_times.data(), ts_tmax.data());
+        // Output 3: Tmin (instantaneous)
+        write_time_series_record(&outargs[2 * single_ts_size], 1, 0, num_points, ts_times.data(), ts_tmin.data());
+
+        if (g_step_session.log_file && g_step_session.log_level >= LOG_INFO) {
+            fprintf(g_step_session.log_file,
+                "[CligenWeather] Realization %ld generated: %d points from OLE %.1f to %.1f (Total precip=%.1f %s, avg Tmax=%.1f, avg Tmin=%.1f)\n",
+                real_id, num_points, ts_times.front(), ts_times.back(),
+                std::accumulate(ts_prcp.begin(), ts_prcp.end(), 0.0), (units == 1 ? "in" : "mm"),
+                std::accumulate(ts_tmax.begin(), ts_tmax.end(), 0.0) / num_points,
+                std::accumulate(ts_tmin.begin(), ts_tmin.end(), 0.0) / num_points);
+            fflush(g_step_session.log_file);
+        }
+        break;
+    }
+
+    case XF_CLEANUP: {
+        g_step_session.close_log();
+        g_step_session.initialized = false;
+        break;
+    }
+
+    default:
+        if (status) *status = XF_FAILURE;
+        break;
+    }
+}
+
+// ===========================================================================
+// Exported GoldSim Entry Points
+// ===========================================================================
+
+// Primary entry point for GoldSim: Generates complete Time Series once per realization
+GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
+                                     double* inargs, double* outargs) {
+    execute_cligen_timeseries(methodID, status, inargs, outargs);
+}
+
+// Explicit alias for Time Series mode
+GS_EXPORT void GS_CALL cligen_weather_ts(int methodID, int* status,
+                                        double* inargs, double* outargs) {
+    execute_cligen_timeseries(methodID, status, inargs, outargs);
+}
+
+// Step-by-step array mode (112 inputs: 4 scalars + 9 vectors of 12)
 GS_EXPORT void GS_CALL cligen_weather_arrays(int methodID, int* status,
                                             double* inargs, double* outargs) {
     execute_cligen(true, methodID, status, inargs, outargs);
 }
 
-// Step-by-step entry point: 13 daily scalar inputs
+// Step-by-step scalar mode (13 scalar inputs)
 GS_EXPORT void GS_CALL cligen_weather_step(int methodID, int* status,
                                            double* inargs, double* outargs) {
     execute_cligen(false, methodID, status, inargs, outargs);
