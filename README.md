@@ -81,6 +81,7 @@ Both **CLIGEN** (USDA-ARS) and **WGEN** (Richardson & Wright) are established st
    * File Name: `CligenWeather.dll`
    * Function: `cligen_weather_step`
    * Calling Convention: `__cdecl`
+   * **Important (32-bit GoldSim / 64-bit DLL)**: If running 32-bit GoldSim with this 64-bit DLL, ensure the **"Run in separate process"** checkbox is checked on the External Element's Definition tab. Without this, GoldSim will report Windows Error Code 193 (`ERROR_BAD_EXE_FORMAT`) when attempting to load the 64-bit binary in-process.
 4. **Link Arguments**:
    Link the 13 scalar inputs in order. Every single argument in the External element interface is a pure scalar value.
 5. **Run**:
