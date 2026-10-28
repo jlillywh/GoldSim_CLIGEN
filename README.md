@@ -53,7 +53,7 @@ Both **CLIGEN** (USDA-ARS) and **WGEN** (Richardson & Wright) are established st
 ### Outputs (`outargs` &mdash; 3 Scalars)
 | Index | Output Parameter | Units | Description |
 | :---: | :--- | :--- | :--- |
-| `[0]` | `Precipitation` | `in` or `mm` | Daily stochastic precipitation depth |
+| `[0]` | `Precip_Rate` | `in/day` or `mm/day` | Stochastic precipitation rate for the current timestep (`prcp / DT`) |
 | `[1]` | `Tmax` | `&deg;F` or `&deg;C` | Daily maximum air temperature |
 | `[2]` | `Tmin` | `&deg;F` or `&deg;C` | Daily minimum air temperature |
 
