@@ -90,6 +90,38 @@ static constexpr double DLL_VERSION      = 3.0;
 // is called automatically the first time a new realization index is seen so
 // each realization is an independent sequence.
 // ---------------------------------------------------------------------------
+#include <cstdlib>
+#include <string>
+#include <cctype>
+
+enum LogLevel {
+    LOG_OFF   = 0,
+    LOG_ERROR = 1,
+    LOG_INFO  = 2,
+    LOG_DEBUG = 3
+};
+
+inline LogLevel detect_log_level() {
+    // 1. Check environment variable CLIGEN_LOG_LEVEL
+    const char* env = std::getenv("CLIGEN_LOG_LEVEL");
+    if (env) {
+        std::string s(env);
+        for (auto& c : s) c = std::toupper(static_cast<unsigned char>(c));
+        if (s == "DEBUG" || s == "3") return LOG_DEBUG;
+        if (s == "INFO"  || s == "2") return LOG_INFO;
+        if (s == "ERROR" || s == "1") return LOG_ERROR;
+        if (s == "OFF" || s == "NONE" || s == "0") return LOG_OFF;
+    }
+    // 2. Check for presence of cligen_debug.txt flag in working directory
+    FILE* fdbg = fopen("cligen_debug.txt", "r");
+    if (fdbg) {
+        fclose(fdbg);
+        return LOG_DEBUG;
+    }
+    // Default to LOG_ERROR so simulations run at maximum speed with zero I/O overhead
+    return LOG_ERROR;
+}
+
 namespace {
     struct StepSession {
         bool initialized = false;
@@ -101,23 +133,40 @@ namespace {
         std::mt19937_64 rng;
         std::normal_distribution<double> norm{0.0, 1.0};
         std::uniform_real_distribution<double> uni{0.0, 1.0};
+        LogLevel log_level = LOG_ERROR;
         FILE* log_file = nullptr;
 
         void open_log() {
-            if (!log_file) {
+            log_level = detect_log_level();
+            if (log_level == LOG_OFF) return;
+
+            // Only create/open the file upfront if INFO or DEBUG is requested
+            if (log_level >= LOG_INFO && !log_file) {
                 log_file = fopen("cligen_debug.log", "w");
                 if (log_file) {
                     fprintf(log_file, "====================================================================================\n");
-                    fprintf(log_file, " CligenWeather.dll v%.1f Debug Log (GoldSim External Element)\n", DLL_VERSION);
+                    fprintf(log_file, " CligenWeather.dll v%.1f Log (Level: %s)\n", DLL_VERSION,
+                        log_level == LOG_DEBUG ? "DEBUG" : (log_level == LOG_INFO ? "INFO" : "ERROR"));
                     fprintf(log_file, "====================================================================================\n");
                     fflush(log_file);
                 }
             }
         }
 
+        void log_error(const char* msg) {
+            if (log_level < LOG_ERROR) return;
+            if (!log_file) log_file = fopen("cligen_debug.log", "a");
+            if (log_file) {
+                fprintf(log_file, "[ERROR] Step %ld: %s\n", step_count, msg);
+                fflush(log_file);
+            }
+        }
+
         void close_log() {
             if (log_file) {
-                fprintf(log_file, "[CligenWeather] Simulation finished. Total steps: %ld\n", step_count);
+                if (log_level >= LOG_INFO) {
+                    fprintf(log_file, "[CligenWeather] Simulation finished. Total steps: %ld\n", step_count);
+                }
                 fclose(log_file);
                 log_file = nullptr;
             }
@@ -131,7 +180,7 @@ namespace {
             prev_wet = false;
             res_tmax = 0.0;
             res_tmin = 0.0;
-            if (log_file) {
+            if (log_file && log_level >= LOG_INFO) {
                 fprintf(log_file, "\n--- Realization %ld (Seed: %llu) ---\n", real_id, (unsigned long long)seed);
                 fflush(log_file);
             }
@@ -152,7 +201,7 @@ GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
         g_step_session.initialized = true;
         g_step_session.current_realization = -1;
         g_step_session.step_count = 0;
-        if (g_step_session.log_file) {
+        if (g_step_session.log_file && g_step_session.log_level >= LOG_INFO) {
             fprintf(g_step_session.log_file, "[CligenWeather] Session initialized.\n");
             fflush(g_step_session.log_file);
         }
@@ -174,6 +223,7 @@ GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
 
     case XF_CALCULATE: {
         if (!inargs || !outargs) {
+            g_step_session.log_error("Null inargs or outargs pointer passed by GoldSim");
             if (status) *status = XF_FAILURE;
             return;
         }
@@ -265,7 +315,7 @@ GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
         outargs[2] = tmin;                            // Tmin
 
         g_step_session.step_count++;
-        if (g_step_session.log_file) {
+        if (g_step_session.log_file && g_step_session.log_level >= LOG_DEBUG) {
             if (g_step_session.step_count <= 100 || (g_step_session.step_count % 365 == 0)) {
                 fprintf(g_step_session.log_file,
                     "Step %5ld | ETIME=%6.1f d | Real=%ld | In: PWW=%.3f PWD=%.3f MP=%.3f SDP=%.3f Skew=%.2f MTmax=%.1f SDTmax=%.2f MTmin=%.1f SDTmin=%.2f | Out: Wet=%d Precip_Rate=%7.4f %s Tmax=%5.2f Tmin=%5.2f\n",

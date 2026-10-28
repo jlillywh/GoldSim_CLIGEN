@@ -89,6 +89,21 @@ Both **CLIGEN** (USDA-ARS) and **WGEN** (Richardson & Wright) are established st
 
 ---
 
+## Logging & Performance Control
+
+By default, the DLL operates in **`ERROR`** mode for maximum execution speed, with zero disk I/O on timesteps.
+
+If you wish to control or enable debug logging:
+* **Default (`ERROR` / Fast Mode)**: Only critical failures (e.g. null arguments) are recorded.
+* **To Enable Debug Logging (`DEBUG`)**:
+  * Set the Windows environment variable: `CLIGEN_LOG_LEVEL=DEBUG`
+  * **Or** simply create an empty file named `cligen_debug.txt` in the same directory as your `.gsm` model.
+  * When active, detailed step progression is written to `cligen_debug.log`.
+* **To Fully Disable All Logging (`OFF`)**:
+  * Set environment variable: `CLIGEN_LOG_LEVEL=OFF` or `CLIGEN_LOG_LEVEL=NONE`.
+
+---
+
 ## Building from Source
 
 You do not need to install anything if using the pre-compiled `CligenWeather.dll`. If you wish to compile it yourself:
