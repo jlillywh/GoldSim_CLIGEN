@@ -2,6 +2,8 @@
 
 A standalone, zero-dependency **64-bit native C++17 Windows DLL (`CligenWeather.dll`)** that embeds the stochastic daily weather generation mathematics of **CLIGEN** directly inside a **GoldSim External (DLL) Element**, outputting full **Time Series Definitions** at initialization (`ETime = 0`) for high-speed Monte Carlo simulations.
 
+To generate the 12-month **CLIGEN parameters** (`PWW`, `PWD`, `Mean_P`, `SD_P`, `Skew_P`, `Mean_Tmax`, `SD_Tmax`, `Mean_Tmin`, `SD_Tmin`) for any project site from historical weather station data (GHCN-Daily, ERA5, or custom CSV/Excel records), use the **[Stochastic Climate Simulator](https://www.lillywhitewater.com/tools/climate-simulator/)** web application on [lillywhitewater.com](https://www.lillywhitewater.com) (see the [User Manual](https://www.lillywhitewater.com/docs/climate-simulator/)).
+
 ---
 
 ## Key Features
@@ -18,10 +20,10 @@ A standalone, zero-dependency **64-bit native C++17 Windows DLL (`CligenWeather.
 ## Quick Start in GoldSim
 
 ### 1. Place `CligenWeather.dll` in Your Model Folder
-Download `CligenWeather.dll` from the latest [GitHub Release](https://github.com/jlillywh/GoldSim_CLIGEN/releases/latest) (or from the **GoldSim DLL** tab of the Climate Simulator web app) and place it in the same folder as your `.gsm` model file.
+Download `CligenWeather.dll` from the latest [GitHub Release](https://github.com/jlillywh/GoldSim_CLIGEN/releases/latest) (or from the **GoldSim DLL** tab of the [Stochastic Climate Simulator](https://www.lillywhitewater.com/tools/climate-simulator/) web app) and place it in the same folder as your `.gsm` model file.
 
 ### 2. Create 9 Monthly Vector Data Elements (`Vector[Months]`)
-In GoldSim, create 9 Data elements defined as `1-D Array (Vector)` indexed by `Months`. Paste the 12 monthly values from the Climate Simulator **CLIGEN Parameters** tab into:
+In the [Stochastic Climate Simulator](https://www.lillywhitewater.com/tools/climate-simulator/), select a weather station on the map (or upload historical daily weather data) and open the **CLIGEN Parameters** tab to compute your site's monthly statistics. In GoldSim, create 9 Data elements defined as `1-D Array (Vector)` indexed by `Months` and paste the 12 monthly values from the **CLIGEN Parameters** tab into:
 
 | Element Name | Units | Description |
 | :--- | :--- | :--- |
