@@ -4,124 +4,124 @@
 [![C++17](https://img.shields.io/badge/language-C%2B%2B17-orange.svg)](https://github.com/jlillywh/GoldSim_CLIGEN)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-[GoldSim](https://www.goldsim.com/Web/Home/) DLL `CligenWeather.dll` links directly to GoldSim's External Element to run stochastic simulations of daily weather data (precipitation, Tmax, and Tmin).
+`CligenWeather.dll` is a compiled C++ implementation of the **CLIGEN** stochastic weather generator that interfaces directly with [GoldSim](https://www.goldsim.com/Web/Home/)'s External (DLL) element to simulate daily weather data (precipitation, $T_{\max}$, and $T_{\min}$) during Monte Carlo simulations.
 
 ---
 
-## Why CLIGEN vs. WGEN?
+## About CLIGEN
 
-Both **CLIGEN** (USDA-ARS) and **WGEN** (Richardson & Wright) are established stochastic weather generators that share a first-order two-state Markov chain for wet/dry day transitions. However, CLIGEN was developed specifically to overcome three key limitations in WGEN:
+**CLIGEN** (Climate Generator) is a stochastic weather generator developed by the **USDA Agricultural Research Service (ARS)** originally for the Water Erosion Prediction Project (WEPP) and widely used in hydrological, agricultural, and environmental modeling (Nicks et al., 1995; Flanagan & Nearing, 1995). Rather than replaying a single historical weather record, CLIGEN uses monthly statistical parameters derived from long-term meteorological station records to generate synthetic daily weather sequences of arbitrary length across multiple Monte Carlo realizations.
 
-1. **Extreme Precipitation Tails (Pearson Type III vs. Gamma)**:
-   * **WGEN** samples daily precipitation depth from a 2-parameter Gamma or Exponential distribution. Because these distributions have exponentially thin tails and no skewness adjustment, WGEN systematically **underpredicts extreme storm depths** (25-year to 100-year events) by 20% to 50%.
-   * **CLIGEN** uses a 3-parameter **Pearson Type III distribution** via the Wilson-Hilferty transformation. By incorporating monthly skewness coefficients ($\text{Skew}_P$), CLIGEN accurately reproduces both everyday moderate rainfall and the heavy positive tails of extreme design storm events.
+Key statistical components of the generator include:
 
-2. **Storm Patterning & Sub-Daily Mechanics**:
-   * **WGEN** produces only bulk daily totals without storm pattern parameterization.
-   * **CLIGEN** incorporates internal sub-daily mechanics developed for the USDA Water Erosion Prediction Project (WEPP), including time-to-peak and peak intensity modeling using a mass-conserving double-exponential profile, and diurnal temperature cycles conditioned on daily $T_{\max}$ and $T_{\min}$.
+1. **Precipitation Occurrence (First-Order Two-State Markov Chain)**:
+   Daily wet and dry state transitions are modeled using two monthly conditional probabilities: $P(W|W)$, the probability of a wet day following a wet day, and $P(W|D)$, the probability of a wet day following a dry day. This structure preserves the seasonal frequency of precipitation as well as the distribution of wet-spell and dry-spell durations.
 
-3. **Physically Conditioned Temperatures**:
-   * **WGEN** uses an unconditioned continuous autoregressive model that can occasionally produce runaway temperature extremes (e.g., $>55^\circ\text{C}$ / $130^\circ\text{F}$) over long Monte Carlo realizations.
-   * **CLIGEN** conditions temperature directly on wet/dry occurrence: on wet days, $T_{\max}$ is depressed to reflect cloud cover and evaporative cooling. Coupled with bivariate cross-correlation ($r = 0.65$) and lag-1 persistence ($\rho = 0.60$), it prevents runaway extremes while preserving day-to-day temperature memory.
+2. **Precipitation Depth (Skewed Pearson Type III Distribution)**:
+   On simulated wet days, daily precipitation depth is sampled from a three-parameter **Pearson Type III** (skewed Gamma-family) distribution using the Wilson–Hilferty transformation, parameterized by each month's wet-day mean (`Mean_P`), standard deviation (`SD_P`), and skewness coefficient (`Skew_P`). Incorporating historical skewness reproduces both frequent light rainfall events and extreme right-tail storm depths.
+
+3. **Daily Air Temperature ($T_{\max}$ and $T_{\min}$)**:
+   Daily maximum and minimum temperatures are generated from monthly means (`Mean_Tmax`, `Mean_Tmin`) and standard deviations (`SD_Tmax`, `SD_Tmin`) using correlated normal variates with lag-1 day-to-day persistence ($\rho = 0.60$) and same-day cross-correlation ($r = 0.65$). Maximum temperature is conditioned on the day's wet/dry state to reflect reduced solar heating and evaporative cooling on rainy days while preserving the unconditional monthly mean.
+
+4. **Continuous Seasonal Interpolation**:
+   To avoid step changes at month boundaries, `CligenWeather.dll` fits a periodic cubic spline through the 12 monthly values of each input parameter vector and evaluates the smooth seasonal curve at the current day of the year on each simulation timestep.
+
+---
+
+## GoldSim Integration Steps
+
+### 1. Drop DLL into Model Directory
+Place `CligenWeather.dll` in the directory containing your GoldSim (`.gsm`) model. No installation or external runtime environment is required.
+* **64-bit GoldSim**: Use `CligenWeather.dll` (or `CligenWeather_x64.dll`) in-process.
+* **32-bit GoldSim**: Check **"Run in separate process"** on the External element's Definition tab to avoid Windows Error 193 (`ERROR_BAD_EXE_FORMAT`), or use the 32-bit build `CligenWeather_win32.dll` (renamed to `CligenWeather.dll`).
+
+### 2. Paste Parameters into Data Elements
+Define 12-item monthly vector parameters (Data elements indexed by `Months`, Jan–Dec) in GoldSim to supply the 9 monthly parameter vectors (`P_WW`, `P_WD`, `Mean_P`, `SD_P`, `Skew_P`, `Mean_Tmax`, `SD_Tmax`, `Mean_Tmin`, `SD_Tmin`) to the External element.
+
+### 3. Link External Element & Run
+In GoldSim, insert an External element (**Insert Element → Functions → External (DLL)**):
+* **File Name**: `CligenWeather.dll`
+* **Function Name**: `CligenWeather` (or `cligen_weather_step` / `cligen_weather_arrays`)
+* **Calling Convention**: `__cdecl`
+
+Link the 4 run-property scalars, 9 monthly 12-item vectors, and 3 daily outputs (`Precip_Rate`, `Tmax`, `Tmin`).
 
 ---
 
 ## Technical Interface Specification
 
-### External Element Export
-* **DLL Name**: `CligenWeather.dll`
-* **Function Name**: `CligenWeather` (or `cligen_weather_step` / `cligen_weather_arrays`)
-* **Calling Convention**: `__cdecl` (Standard C)
-* **Total GoldSim Input Arguments**: **112** (4 scalar controls + 9 monthly vectors of 12 elements each)
+### DLL Input Arguments (`GoldSim → DLL`)
+Values GoldSim sends to the DLL at each simulation step (4 scalars + 9 monthly 12-item vectors):
 
-The DLL takes the 12-month climate parameter vectors (`Vector[12]`, Jan..Dec) and fits a **periodic cubic spline** through each 12-month parameter cycle, eliminating artificial step-function jumps at month boundaries and maintaining continuous first and second derivatives across the year.
+| Input Argument | Type / Unit | Description |
+| :--- | :--- | :--- |
+| `Simulation_Time` | `Scalar (day)` | Current elapsed simulation time (link to GoldSim `ETIME` or `DateTime`) |
+| `Time_Step` | `Scalar (day)` | Model time step (link to GoldSim `DT`, e.g. 1.0 day) |
+| `Realization` | `Scalar (-)` | Current Monte Carlo realization (link to GoldSim `Realization`) |
+| `Units_Flag` | `Scalar (0 or 1)` | `0` = Metric (mm, &deg;C), `1` = US Customary (in, &deg;F) |
+| `P_WW` | `Vector[12] (-)` | Monthly wet-day probability given yesterday was wet (12 items, Jan–Dec) |
+| `P_WD` | `Vector[12] (-)` | Monthly wet-day probability given yesterday was dry (12 items, Jan–Dec) |
+| `Mean_P` | `Vector[12] (in or mm)` | Monthly mean daily precipitation depth on wet days (12 items, Jan–Dec) |
+| `SD_P` | `Vector[12] (in or mm)` | Monthly daily precipitation standard deviation (12 items, Jan–Dec) |
+| `Skew_P` | `Vector[12] (-)` | Monthly daily precipitation skewness coefficient (12 items, Jan–Dec) |
+| `Mean_Tmax` | `Vector[12] (°F or °C)` | Monthly mean daily maximum air temperature (12 items, Jan–Dec) |
+| `SD_Tmax` | `Vector[12] (Fdeg or Cdeg)` | Monthly daily maximum temperature standard deviation (12 items, Jan–Dec) |
+| `Mean_Tmin` | `Vector[12] (°F or °C)` | Monthly mean daily minimum air temperature (12 items, Jan–Dec) |
+| `SD_Tmin` | `Vector[12] (Fdeg or Cdeg)` | Monthly daily minimum temperature standard deviation (12 items, Jan–Dec) |
 
-### Inputs (`inargs` &mdash; 4 Scalars + 9 Monthly Vectors)
-| Index Range | Argument Name | GoldSim Type | Typical Unit | Description |
-| :---: | :--- | :--- | :--- | :--- |
-| `[0]` | `Simulation_Time` | Scalar Value | `day` | GoldSim `DateTime` run property (preferred) or `ETIME` |
-| `[1]` | `Time_Step` | Scalar Value | `day` | Model timestep duration (GoldSim `DT`, e.g. 1.0 day) |
-| `[2]` | `Realization` | Scalar Value | `-` | Current Monte Carlo realization (GoldSim `Realization`) |
-| `[3]` | `Units_Flag` | Scalar Value | `-` | `0` = Metric (mm, &deg;C), `1` = US Customary (in, &deg;F) |
-| `[4..15]` | `P_WW` | Vector [12] | `-` | Monthly wet-day probability given yesterday was wet $P(W\|W)$ (12 items, Jan–Dec) |
-| `[16..27]` | `P_WD` | Vector [12] | `-` | Monthly wet-day probability given yesterday was dry $P(W\|D)$ (12 items, Jan–Dec) |
-| `[28..39]` | `Mean_P` | Vector [12] | `in` or `mm` | Monthly mean daily precipitation depth on wet days (12 items, Jan–Dec) |
-| `[40..51]` | `SD_P` | Vector [12] | `in` or `mm` | Monthly daily precipitation standard deviation (12 items, Jan–Dec) |
-| `[52..63]` | `Skew_P` | Vector [12] | `-` | Monthly daily precipitation skewness coefficient (12 items, Jan–Dec) |
-| `[64..75]` | `Mean_Tmax` | Vector [12] | `&deg;F` or `&deg;C` | Monthly mean daily maximum air temperature (12 items, Jan–Dec) |
-| `[76..87]` | `SD_Tmax` | Vector [12] | `Fdeg` or `Cdeg` | Monthly daily maximum temperature standard deviation (12 items, Jan–Dec) |
-| `[88..99]` | `Mean_Tmin` | Vector [12] | `&deg;F` or `&deg;C` | Monthly mean daily minimum air temperature (12 items, Jan–Dec) |
-| `[100..111]` | `SD_Tmin` | Vector [12] | `Fdeg` or `Cdeg` | Monthly daily minimum temperature standard deviation (12 items, Jan–Dec) |
+### DLL Outputs Returned to GoldSim (`DLL → GoldSim`)
+Values updated by the DLL on each daily simulation timestep (3 values):
 
-> **Note on Calendar Synchronization:** When you pass GoldSim's built-in `DateTime` run property (e.g. `Simulation \ Run Properties \ DateTime`) as argument `[0]`, the DLL automatically detects the calendar date, extracts the day-of-year (1..366), accounts for leap years, and evaluates the splines at the correct season regardless of whether your simulation starts in January, October, or any other month. If an elapsed time `ETIME` (starting from 0) is passed, the DLL falls back to starting at Day 1 (Jan 1).
-
-### Outputs (`outargs` &mdash; 3 Scalars)
-| Index | Output Parameter | Units | Description |
-| :---: | :--- | :--- | :--- |
-| `[0]` | `Precip_Rate` | `in/day` or `mm/day` | Stochastic precipitation rate for the current timestep (`prcp / DT`) |
-| `[1]` | `Tmax` | `&deg;F` or `&deg;C` | Daily maximum air temperature |
-| `[2]` | `Tmin` | `&deg;F` or `&deg;C` | Daily minimum air temperature |
+| Output Parameter | Units | Description |
+| :--- | :--- | :--- |
+| `Precip_Rate` | `mm/day or in/day` | Simulated stochastic precipitation rate for the current timestep (`prcp / DT`) |
+| `Tmax` | `°C or °F` | Simulated daily maximum air temperature |
+| `Tmin` | `°C or °F` | Simulated daily minimum air temperature |
 
 ---
 
-## GoldSim Setup Guide
+## Logging & Diagnostics
 
-1. **Place DLL**: Copy `CligenWeather.dll` into the folder containing your GoldSim model file (`.gsm`).
-   * **64-bit GoldSim**: Use `CligenWeather.dll` (or `CligenWeather_x64.dll`) in-process.
-   * **32-bit GoldSim**: Either use `CligenWeather_win32.dll` (renamed to `CligenWeather.dll`) in-process, or check the **"Run in separate process"** checkbox on the Definition tab when using the 64-bit `CligenWeather.dll`.
-2. **Define Monthly Vector Parameters**:
-   Create 12-item monthly vector Data elements (`Vector[Months]`, Jan–Dec) in GoldSim for each of the 9 climate parameters (`P_WW`, `P_WD`, `Mean_P`, `SD_P`, `Skew_P`, `Mean_Tmax`, `SD_Tmax`, `Mean_Tmin`, `SD_Tmin`).
-3. **Insert External Element**:
-   * Right-click canvas &rarr; **Insert Element &rarr; Functions &rarr; External (DLL)**.
-   * **File Name**: `CligenWeather.dll`
-   * **Function**: `CligenWeather` (or `cligen_weather_step`)
-   * **Calling Convention**: `__cdecl`
-4. **Link Arguments**:
-   Link `Simulation_Time` (`DateTime` or `ETime`), `Time_Step` (`DT`), `Realization`, `Units_Flag`, followed by the 9 monthly 12-item vectors (`P_WW`, `P_WD`, `Mean_P`, `SD_P`, `Skew_P`, `Mean_Tmax`, `SD_Tmax`, `Mean_Tmin`, `SD_Tmin`) in exact order, and the 3 daily outputs (`Precip_Rate`, `Tmax`, `Tmin`).
-5. **Run Simulation**:
-   Run Monte Carlo realizations. The DLL automatically reseeds reproducibly per realization.
-
----
-
-## Logging & Performance Control
-
-By default, the DLL operates in **`ERROR`** mode for maximum execution speed, with zero disk I/O on timesteps.
-
-If you wish to control or enable debug logging:
-* **Default (`ERROR` / Fast Mode)**: Only critical failures (e.g. null arguments) are recorded.
-* **To Enable Debug Logging (`DEBUG`)**:
-  * Set the Windows environment variable: `CLIGEN_LOG_LEVEL=DEBUG`
-  * **Or** simply create an empty file named `cligen_debug.txt` in the same directory as your `.gsm` model.
-  * When active, detailed step progression is written to `cligen_debug.log`.
-* **To Fully Disable All Logging (`OFF`)**:
-  * Set environment variable: `CLIGEN_LOG_LEVEL=OFF` or `CLIGEN_LOG_LEVEL=NONE`.
+By default, `CligenWeather.dll` operates in **`ERROR`** logging mode with zero disk I/O during normal timesteps.
+* **Default (`ERROR`)**: Only critical errors (such as null pointers) are written to `cligen_debug.log`.
+* **Enable Debug Logging (`DEBUG`)**: Set the Windows environment variable `CLIGEN_LOG_LEVEL=DEBUG` or create an empty file named `cligen_debug.txt` in the same directory as your `.gsm` model to write step-by-step diagnostics to `cligen_debug.log`.
+* **Disable All Logging (`OFF`)**: Set `CLIGEN_LOG_LEVEL=OFF`.
 
 ---
 
 ## Building from Source
 
-You do not need to install anything if using the pre-compiled `CligenWeather.dll`. If you wish to compile it yourself:
+Pre-compiled binaries (`CligenWeather.dll`, `CligenWeather_x64.dll`, and `CligenWeather_win32.dll`) are included in the repository. To compile from source:
 
 ### Windows (MSVC or MinGW)
-Double-click `build.bat` or run:
 ```cmd
 build.bat
 ```
-
 Or manually:
-* **MinGW-w64 (g++)**:
+* **MinGW-w64 (`g++`)**:
   ```cmd
-  g++ -O2 -std=c++17 -Wall -shared goldsim_external.cpp -o CligenWeather.dll -static -Wl,--add-stdcall-alias
+  g++ -O3 -std=c++17 -Wall -shared goldsim_external.cpp -o CligenWeather.dll -static -Wl,--add-stdcall-alias
   ```
-* **Microsoft Visual C++ (MSVC)**:
+* **Microsoft Visual C++ (`cl`)**:
   ```cmd
   cl /O2 /std:c++17 /EHsc /LD goldsim_external.cpp /Fe:CligenWeather.dll
   ```
 
-### Linux (Cross-Compilation to Windows 64-bit)
+### Linux (Cross-Compilation via MinGW-w64)
 ```sh
-make dll CXX=x86_64-w64-mingw32-g++
+make dll
 ```
+
+---
+
+## References & Further Reading
+
+* Nicks, A. D., Lane, L. J., & Gander, G. A. (1995). *Weather Generator*. Chapter 2 in **USDA–Water Erosion Prediction Project: Hillslope Profile and Watershed Model Documentation**, NSERL Report No. 10, USDA-ARS National Soil Erosion Research Laboratory, West Lafayette, IN.
+* Flanagan, D. C., & Nearing, M. A. (Eds.) (1995). *USDA–Water Erosion Prediction Project: Hillslope Profile and Watershed Model Documentation*. NSERL Report No. 10, USDA-ARS National Soil Erosion Research Laboratory.
+* Zhang, X. C., & Garbrecht, J. D. (2003). *Evaluation of CLIGEN precipitation parameters and their implication on WEPP runoff and erosion prediction*. Transactions of the ASAE, 46(2), 311–320.
+* Kou, X., Ge, J., Wang, Y., & Zhang, C. (2007). *Validation of the weather generator CLIGEN with daily precipitation data from the Loess Plateau, China*. Journal of Hydrology, 347(3–4), 347–357.
+* Meyer, C. R., Renschler, C. S., & Vining, R. C. (2008). *Implementing quality control on a random number stream to improve a stochastic weather generator*. Hydrological Processes, 22(8), 1069–1079.
+* USDA-ARS National Soil Erosion Research Laboratory: [CLIGEN Documentation & Overview](https://www.ars.usda.gov/midwest-area/west-lafayette-in/national-soil-erosion-research/docs/wepp/cligen/).
 
 ---
 
