@@ -1,4 +1,4 @@
-# GoldSim – CLIGEN Native Weather Generator (`CligenWeather.dll`)
+# GoldSim – CLIGEN Weather Generator (`CligenWeather.dll`)
 
 A standalone, zero-dependency **64-bit native C++17 Windows DLL (`CligenWeather.dll`)** that embeds the stochastic daily weather generation mathematics of **CLIGEN** directly inside a **GoldSim External (DLL) Element**, outputting full **Time Series Definitions** at initialization (`ETime = 0`) for high-speed Monte Carlo simulations.
 
