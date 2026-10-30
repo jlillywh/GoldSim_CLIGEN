@@ -7,6 +7,7 @@ A standalone, zero-dependency **64-bit native C++17 Windows DLL (`CligenWeather.
 ## Key Features
 
 - **Single 64-bit Native DLL (`CligenWeather.dll`)**: Statically linked C++17 binary—no Python runtime, external libraries, or installation required.
+- **Ready-to-Run Salt Lake City Example (`CLIGEN_SLC.gsm` & `CLIGEN_SLC.gsp`)**: Includes both a complete GoldSim model file (`CLIGEN_SLC.gsm`) and a GoldSim Player file (`CLIGEN_SLC.gsp`) parameterized with historical weather data from **Salt Lake City International Airport (KSLC)** so you can immediately run and inspect a working model.
 - **Full Time Series Definition Output**: Computes the entire realization's daily weather record at `ETime = 0` (`XF_CALCULATE_TS`) and passes three **Time Series Definitions** (`Precip_Rate`, `Tmax`, `Tmin`) directly to GoldSim Time Series elements.
 - **Seasonal Periodic Cubic Spline Interpolation**: Fits a periodic cubic spline across your 12 monthly climate parameters (`Jan..Dec`) so daily wet/dry transition probabilities, skewed precipitation depths, and temperature distributions transition smoothly across every calendar day of the year without step-function jumps at month boundaries.
 - **CLIGEN Skewed Normal / Pearson Type III Precipitation & Wet/Dry Conditioned Temperatures**: Preserves high-tail extreme storm events, first-order Markov wet/dry persistence (`P_WW`, `P_WD`), and Matalas (1967) AR(1) lag-1 serial & cross-correlated daily temperature residuals (`Tmax`, `Tmin`).
