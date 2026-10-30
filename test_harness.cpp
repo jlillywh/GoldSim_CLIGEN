@@ -25,9 +25,11 @@
 #include <algorithm>
 #include <cmath>
 
-// Forward declaration of the DLL entry point (linked from goldsim_external.cpp).
+// Forward declaration of the DLL entry points (linked from goldsim_external.cpp).
 extern "C" void CligenWeather(int methodID, int* status,
                               double* inargs, double* outargs);
+extern "C" void cligen_weather_step(int methodID, int* status,
+                                    double* inargs, double* outargs);
 
 enum { XF_INITIALIZE = 0, XF_CALCULATE = 1, XF_REP_ARGUMENTS = 3, XF_CLEANUP = 99 };
 
@@ -58,14 +60,14 @@ int main(int argc, char** argv) {
 
     int status = 0;
 
-    // Confirm the element advertises the scalar contract (13 in, 3 out).
+    // Confirm CligenWeather advertises the Time Series contract (113 in, 3 out).
     double rep_out[8] = {0};
     CligenWeather(XF_REP_ARGUMENTS, &status, nullptr, rep_out);
     int num_inputs = (int)rep_out[0];
     int num_outputs = (int)rep_out[1];
-    printf(" Element reports %d inputs, %d outputs per timestep.\n", num_inputs, num_outputs);
+    printf(" CligenWeather (Time Series) reports %d inputs, %d outputs.\n", num_inputs, num_outputs);
 
-    CligenWeather(XF_INITIALIZE, &status, nullptr, nullptr);
+    cligen_weather_step(XF_INITIALIZE, &status, nullptr, nullptr);
     if (status != 0) { fprintf(stderr, "INITIALIZE failed\n"); return 2; }
 
     // 12 months x 5 cols for Precip: [PWW, PWD, Mean, SD, Skew]
@@ -137,7 +139,7 @@ int main(int argc, char** argv) {
         in[2] = seed;           // Realization (constant -> one continuous sequence)
         in[3] = 0.0;            // Units_Flag (0 = Metric, deg C / mm)
 
-        CligenWeather(XF_CALCULATE, &status, in.data(), out);
+        cligen_weather_step(XF_CALCULATE, &status, in.data(), out);
         if (status != 0) { fprintf(stderr, "CALCULATE failed on day %ld\n", d); return 2; }
 
         double p = out[0], hi = out[1], lo = out[2];
@@ -155,7 +157,7 @@ int main(int argc, char** argv) {
         if (++doy > 365) doy = 1;
     }
 
-    CligenWeather(XF_CLEANUP, &status, nullptr, nullptr);
+    cligen_weather_step(XF_CLEANUP, &status, nullptr, nullptr);
 
     int n = (int)tmax.size();
     FILE* f = fopen(out_csv.c_str(), "w");

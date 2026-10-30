@@ -218,7 +218,7 @@ namespace {
             log_level = detect_log_level();
             if (log_level < LOG_INFO) return;
             log_cligen_info("====================================================================================\n");
-            log_cligen_info(" CligenWeather_TS.dll v%.1f Log (Level: %s)\n", DLL_VERSION,
+            log_cligen_info(" CligenWeather.dll v%.1f Log (Level: %s)\n", DLL_VERSION,
                 log_level == LOG_DEBUG ? "DEBUG" : (log_level == LOG_INFO ? "INFO" : "ERROR"));
             log_cligen_info("====================================================================================\n");
         }
@@ -231,7 +231,7 @@ namespace {
             if (step_count > 0) {
                 log_cligen_info("[CligenWeather] Simulation finished. Total steps: %ld\n", step_count);
             } else {
-                log_cligen_info("[CligenWeather_TS] Simulation cleanup complete.\n");
+                log_cligen_info("[CligenWeather] Simulation cleanup complete.\n");
             }
         }
 
@@ -799,13 +799,19 @@ static void execute_cligen_timeseries(int methodID, int* status,
 // Exported GoldSim Entry Points
 // ===========================================================================
 
-// Primary entry point: 112 inputs (4 scalars + 9 monthly 12-item vectors) -> 3 daily scalar outputs
+// Primary entry point: 113 inputs (5 scalars + 9 monthly 12-item vectors) -> 3 Time Series Definition outputs
 GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
                                      double* inargs, double* outargs) {
-    execute_cligen(true, methodID, status, inargs, outargs);
+    execute_cligen_timeseries(methodID, status, inargs, outargs);
 }
 
-// Alias for 112-input monthly vector spline mode (4 scalars + 9 vectors of 12)
+// Explicit alias for GoldSim Time Series Definition mode (113 inputs -> 3 Time Series)
+GS_EXPORT void GS_CALL cligen_weather_ts(int methodID, int* status,
+                                        double* inargs, double* outargs) {
+    execute_cligen_timeseries(methodID, status, inargs, outargs);
+}
+
+// Step-by-step mode alias: 112 inputs (4 scalars + 9 monthly 12-item vectors) -> 3 daily scalar outputs
 GS_EXPORT void GS_CALL cligen_weather_step(int methodID, int* status,
                                            double* inargs, double* outargs) {
     execute_cligen(true, methodID, status, inargs, outargs);
@@ -815,12 +821,6 @@ GS_EXPORT void GS_CALL cligen_weather_step(int methodID, int* status,
 GS_EXPORT void GS_CALL cligen_weather_arrays(int methodID, int* status,
                                             double* inargs, double* outargs) {
     execute_cligen(true, methodID, status, inargs, outargs);
-}
-
-// Explicit entry point for GoldSim Time Series Definition mode (113 inputs -> 3 Time Series)
-GS_EXPORT void GS_CALL cligen_weather_ts(int methodID, int* status,
-                                        double* inargs, double* outargs) {
-    execute_cligen_timeseries(methodID, status, inargs, outargs);
 }
 
 // Legacy daily scalar mode (13 scalar inputs)
