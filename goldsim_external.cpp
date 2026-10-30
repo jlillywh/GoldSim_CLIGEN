@@ -171,10 +171,10 @@ inline LogLevel detect_log_level() {
     if (env) {
         std::string s(env);
         for (auto& c : s) c = std::toupper(static_cast<unsigned char>(c));
+        if (s == "OFF" || s == "NONE" || s == "0") return LOG_OFF;
         if (s == "DEBUG" || s == "3") return LOG_DEBUG;
         if (s == "INFO"  || s == "2") return LOG_INFO;
         if (s == "ERROR" || s == "1") return LOG_ERROR;
-        if (s == "OFF" || s == "NONE" || s == "0") return LOG_OFF;
     }
     // 2. Check for presence of cligen_debug.txt flag in working directory or DLL directory
     FILE* fdbg = fopen("cligen_debug.txt", "r");
@@ -192,6 +192,14 @@ inline LogLevel detect_log_level() {
     return LOG_ERROR;
 }
 
+#include <cstdarg>
+
+static void log_cligen_level(LogLevel req_level, const char* fmt, ...);
+
+#define log_cligen(...)      log_cligen_level(LOG_DEBUG, __VA_ARGS__)
+#define log_cligen_err(...)  log_cligen_level(LOG_ERROR, __VA_ARGS__)
+#define log_cligen_info(...) log_cligen_level(LOG_INFO,  __VA_ARGS__)
+
 namespace {
     struct StepSession {
         bool initialized = false;
@@ -200,58 +208,30 @@ namespace {
         bool prev_wet = false;      // wet/dry Markov state carried from yesterday
         double res_tmax = 0.0;      // AR(1) max-temperature residual carried forward
         double res_tmin = 0.0;      // AR(1) min-temperature residual carried forward
-        // One seasonal cubic spline per CLIGEN parameter, rebuilt only when the
-        // incoming monthly vectors change (so steady runs pay the solve once).
         cligen::MonthlyCubicSpline param_spline[NUM_PARAM_BLOCKS];
         std::mt19937_64 rng;
         std::normal_distribution<double> norm{0.0, 1.0};
         std::uniform_real_distribution<double> uni{0.0, 1.0};
         LogLevel log_level = LOG_ERROR;
-        FILE* log_file = nullptr;
-        std::string log_filepath;
 
         void open_log() {
             log_level = detect_log_level();
-            if (log_level == LOG_OFF) return;
-
-            if (log_filepath.empty()) {
-                std::string dll_dir = get_dll_directory();
-                log_filepath = dll_dir + "\\cligen_debug.log";
-            }
-
-            // Only create/open the file upfront if INFO or DEBUG is requested
-            if (log_level >= LOG_INFO && !log_file) {
-                log_file = fopen(log_filepath.c_str(), "w");
-                if (!log_file) log_file = fopen("cligen_debug.log", "w");
-                if (log_file) {
-                    fprintf(log_file, "====================================================================================\n");
-                    fprintf(log_file, " CligenWeather.dll v%.1f Log (Level: %s)\n", DLL_VERSION,
-                        log_level == LOG_DEBUG ? "DEBUG" : (log_level == LOG_INFO ? "INFO" : "ERROR"));
-                    fprintf(log_file, "====================================================================================\n");
-                    fflush(log_file);
-                }
-            }
+            if (log_level < LOG_INFO) return;
+            log_cligen_info("====================================================================================\n");
+            log_cligen_info(" CligenWeather_TS.dll v%.1f Log (Level: %s)\n", DLL_VERSION,
+                log_level == LOG_DEBUG ? "DEBUG" : (log_level == LOG_INFO ? "INFO" : "ERROR"));
+            log_cligen_info("====================================================================================\n");
         }
 
         void log_error(const char* msg) {
-            if (log_level < LOG_ERROR) return;
-            if (!log_file) {
-                if (!log_filepath.empty()) log_file = fopen(log_filepath.c_str(), "a");
-                if (!log_file) log_file = fopen("cligen_debug.log", "a");
-            }
-            if (log_file) {
-                fprintf(log_file, "[ERROR] Step %ld: %s\n", step_count, msg);
-                fflush(log_file);
-            }
+            log_cligen_err("[ERROR] Step %ld: %s\n", step_count, msg);
         }
 
         void close_log() {
-            if (log_file) {
-                if (log_level >= LOG_INFO) {
-                    fprintf(log_file, "[CligenWeather] Simulation finished. Total steps: %ld\n", step_count);
-                }
-                fclose(log_file);
-                log_file = nullptr;
+            if (step_count > 0) {
+                log_cligen_info("[CligenWeather] Simulation finished. Total steps: %ld\n", step_count);
+            } else {
+                log_cligen_info("[CligenWeather_TS] Simulation cleanup complete.\n");
             }
         }
 
@@ -263,14 +243,32 @@ namespace {
             prev_wet = false;
             res_tmax = 0.0;
             res_tmin = 0.0;
-            if (log_file && log_level >= LOG_INFO) {
-                fprintf(log_file, "\n--- Realization %ld (Seed: %llu) ---\n", real_id, (unsigned long long)seed);
-                fflush(log_file);
-            }
+            log_cligen_info("\n--- Realization %ld (Seed: %llu) ---\n", real_id, (unsigned long long)seed);
         }
     };
 
     StepSession g_step_session;
+}
+
+static void log_cligen_level(LogLevel req_level, const char* fmt, ...) {
+    if (g_step_session.log_level < req_level) return;
+    char buf[4096];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    // 1. C:\temp\cligen_debug.log
+    FILE* f1 = fopen("C:\\temp\\cligen_debug.log", "a");
+    if (f1) { fputs(buf, f1); fflush(f1); fclose(f1); }
+
+    // 2. DLL folder cligen_debug.log
+    std::string dll_dir = get_dll_directory();
+    if (!dll_dir.empty()) {
+        std::string p2 = dll_dir + "\\cligen_debug.log";
+        FILE* f2 = fopen(p2.c_str(), "a");
+        if (f2) { fputs(buf, f2); fflush(f2); fclose(f2); }
+    }
 }
 
 // Common execution function supporting both 112-input vector spline mode and 13-input scalar mode.
@@ -284,10 +282,9 @@ static void execute_cligen(bool array_mode, int methodID, int* status,
         g_step_session.initialized = true;
         g_step_session.current_realization = -1;
         g_step_session.step_count = 0;
-        if (g_step_session.log_file && g_step_session.log_level >= LOG_INFO) {
-            fprintf(g_step_session.log_file, "[CligenWeather] Session initialized (%s mode).\n",
+        if (g_step_session.log_level >= LOG_INFO) {
+            log_cligen("[CligenWeather] Session initialized (%s mode).\n",
                 array_mode ? "112-vector spline" : "13-scalar step");
-            fflush(g_step_session.log_file);
         }
         break;
     }
@@ -442,16 +439,15 @@ static void execute_cligen(bool array_mode, int methodID, int* status,
         outargs[2] = tmin;                            // Tmin
 
         g_step_session.step_count++;
-        if (g_step_session.log_file && g_step_session.log_level >= LOG_DEBUG) {
+        if (g_step_session.log_level >= LOG_DEBUG) {
             if (g_step_session.step_count <= 100 || (g_step_session.step_count % 365 == 0)) {
-                fprintf(g_step_session.log_file,
+                log_cligen(
                     "Step %5ld | Time=%6.1f | Real=%ld | In: PWW=%.3f PWD=%.3f MP=%.3f SDP=%.3f Skew=%.2f MTmax=%.1f SDTmax=%.2f MTmin=%.1f SDTmin=%.2f | Out: Wet=%d Precip_Rate=%7.4f %s Tmax=%5.2f Tmin=%5.2f\n",
                     g_step_session.step_count, time_val, real_id,
                     pww, pwd, prcp_mean, prcp_sd, prcp_skew,
                     mean_tmax, sd_tmax, mean_tmin, sd_tmin,
                     (is_wet ? 1 : 0), outargs[0], (units == 1 ? "in/d" : "mm/d"),
                     outargs[1], outargs[2]);
-                fflush(g_step_session.log_file);
             }
         }
         break;
@@ -518,21 +514,35 @@ static void execute_cligen_timeseries(int methodID, int* status,
                                       double* inargs, double* outargs) {
     if (status) *status = XF_SUCCESS;
 
+    // Log all incoming method calls to both C:\temp\cligen_debug.log and DLL folder cligen_debug.log
+    log_cligen("[GoldSim Call] MethodID=%d (%s), status=%d, inargs=%p, outargs=%p\n",
+               methodID,
+               methodID == 0 ? "XF_INITIALIZE" :
+               methodID == 1 ? "XF_CALCULATE" :
+               methodID == 2 ? "XF_REP_VERSION" :
+               methodID == 3 ? "XF_REP_ARGUMENTS" :
+               methodID == 99 ? "XF_CLEANUP" : "UNKNOWN",
+               status ? *status : -999,
+               (void*)inargs, (void*)outargs);
+
+    static long s_cached_real_id = -1;
+    static std::vector<double> s_cached_ts_output;
+
     switch (methodID) {
     case XF_INITIALIZE: {
+        s_cached_real_id = -1;
+        s_cached_ts_output.clear();
         g_step_session.open_log();
         g_step_session.initialized = true;
         g_step_session.current_realization = -1;
         g_step_session.step_count = 0;
-        if (g_step_session.log_file && g_step_session.log_level >= LOG_INFO) {
-            fprintf(g_step_session.log_file, "[CligenWeather] Time Series Generator initialized.\n");
-            fflush(g_step_session.log_file);
-        }
+        log_cligen("[CligenWeather_TS] Time Series Generator initialized.\n");
         break;
     }
 
     case XF_REP_VERSION: {
         if (outargs) outargs[0] = DLL_VERSION;
+        log_cligen("  XF_REP_VERSION: reported version %.1f\n", DLL_VERSION);
         break;
     }
 
@@ -541,6 +551,8 @@ static void execute_cligen_timeseries(int methodID, int* status,
             outargs[0] = static_cast<double>(NUM_TS_INPUTS); // 113 inputs
             outargs[1] = static_cast<double>(g_ts_output_buffer_size); // 500,000 doubles initial buffer
         }
+        log_cligen("  XF_REP_ARGUMENTS: reported inputs=%.0f, output_buffer=%.0f\n",
+                   outargs ? outargs[0] : 0.0, outargs ? outargs[1] : 0.0);
         break;
     }
 
@@ -551,15 +563,24 @@ static void execute_cligen_timeseries(int methodID, int* status,
             return;
         }
 
-        const double start_time = inargs[0]; // GoldSim StartTime / DateTime run property
-        const double sim_dur    = (inargs[1] > 0.0) ? inargs[1] : 1.0;
-        const double dt         = (inargs[2] > 0.0) ? inargs[2] : 1.0;
-        const long   real_id    = (inargs[3] >= 1.0) ? static_cast<long>(std::round(inargs[3])) : 1;
-        const int    units      = (inargs[4] >= 0.5) ? 1 : 0; // 0 = Metric, 1 = US Customary
+        const double raw_start_time = inargs[0]; // GoldSim StartTime / DateTime run property
+        const double raw_sim_dur    = (inargs[1] > 0.0) ? inargs[1] : 1.0;
+        const double raw_dt         = (inargs[2] > 0.0) ? inargs[2] : 1.0;
+        const long   real_id        = (inargs[3] >= 1.0) ? static_cast<long>(std::round(inargs[3])) : 1;
+        const int    units          = (inargs[4] >= 0.5) ? 1 : 0; // 0 = Metric, 1 = US Customary
 
-        int num_steps = static_cast<int>(std::round(sim_dur / dt));
+        // Auto-detect and normalize units for SimDuration and TimestepLength:
+        double sim_dur_days = (raw_sim_dur > 10000.0) ? (raw_sim_dur / 86400.0) : raw_sim_dur;
+        double dt_days      = (raw_dt > 100.0) ? (raw_dt / 86400.0) : raw_dt;
+        if (dt_days <= 0.0) dt_days = 1.0;
+        if (sim_dur_days <= 0.0) sim_dur_days = 1.0;
+
+        int num_steps = static_cast<int>(std::ceil(sim_dur_days / dt_days));
         if (num_steps < 1) num_steps = 1;
-        int num_points = num_steps + 1; // from start_time to start_time + sim_dur inclusive
+
+        // GoldSim requires: "The last data point must be on or after the simulation end time."
+        constexpr int BUFFER_STEPS = 5;
+        int num_points = num_steps + 1 + BUFFER_STEPS;
 
         int single_ts_size = 8 + 2 * num_points;
         int total_req_size = NUM_TS_OUTPUTS * single_ts_size;
@@ -568,6 +589,14 @@ static void execute_cligen_timeseries(int methodID, int* status,
             outargs[0] = static_cast<double>(total_req_size);
             g_ts_output_buffer_size = total_req_size;
             if (status) *status = -2; // XF_INCREASE_MEMORY
+            return;
+        }
+
+        // Realization skip guard:
+        // If GoldSim triggers XF_CALCULATE again during the same realization,
+        // instantly return the cached time series without re-running stochastic generation.
+        if (s_cached_real_id == real_id && s_cached_ts_output.size() == static_cast<size_t>(total_req_size)) {
+            std::memcpy(outargs, s_cached_ts_output.data(), total_req_size * sizeof(double));
             return;
         }
 
@@ -591,18 +620,26 @@ static void execute_cligen_timeseries(int methodID, int* status,
         double res_tmax = 0.0;
         double res_tmin = 0.0;
 
+        // Auto-detect Calendar vs Elapsed mode:
+        // In GoldSim Time Series Definitions:
+        // - Calendar mode (time_basis=1.0): GoldSim requires timestamps in SECONDS (Julian Day * 86,400.0).
+        // - Elapsed mode (time_basis=0.0): GoldSim requires timestamps in elapsed days (k * dt_days).
+        const bool is_calendar = (raw_start_time >= 10000.0);
+        const double time_basis = is_calendar ? 1.0 : 0.0;
+        constexpr double SEC_PER_DAY = 86400.0;
+
         for (int k = 0; k < num_points; ++k) {
-            double cur_time = start_time + k * dt;
-            ts_times[k] = cur_time;
+            double cur_day = raw_start_time + k * dt_days;
+            ts_times[k] = is_calendar ? (cur_day * SEC_PER_DAY) : (k * dt_days);
 
             int doy = 1;
             bool leap = false;
-            if (cur_time >= 10000.0) {
+            if (is_calendar) {
                 int year = 0, month = 0, day = 0;
-                cligen::ole_to_date(cur_time, year, month, day, doy);
+                cligen::ole_to_date(cur_day, year, month, day, doy);
                 leap = cligen::is_leap_year(year);
             } else {
-                long day_idx = static_cast<long>(std::floor(cur_time / dt + 0.5));
+                long day_idx = static_cast<long>(std::floor(cur_day / dt_days + 0.5));
                 if (day_idx < 0) day_idx = 0;
                 doy = static_cast<int>((day_idx % 365) + 1);
             }
@@ -680,34 +717,75 @@ static void execute_cligen_timeseries(int methodID, int* status,
                 prcp = std::max(min_prcp, std::round(prcp * round_factor) / round_factor);
             }
 
-            ts_prcp[k] = (dt > 0.0) ? (prcp / dt) : prcp; // mm/d or in/d
-            ts_tmax[k] = tmax;                            // deg C or deg F
-            ts_tmin[k] = tmin;                            // deg C or deg F
+            ts_prcp[k] = (dt_days > 0.0) ? (prcp / dt_days) : prcp; // mm/d or in/d
+            ts_tmax[k] = tmax;                                      // deg C or deg F
+            ts_tmin[k] = tmin;                                      // deg C or deg F
         }
 
         // Package and write the 3 Time Series Definitions into outargs
         // Output 1: Precip_Rate (instantaneous)
-        write_time_series_record(&outargs[0], 1, 0, num_points, ts_times.data(), ts_prcp.data());
+        write_time_series_record(&outargs[0], static_cast<int>(time_basis), 0, num_points, ts_times.data(), ts_prcp.data());
         // Output 2: Tmax (instantaneous)
-        write_time_series_record(&outargs[single_ts_size], 1, 0, num_points, ts_times.data(), ts_tmax.data());
+        write_time_series_record(&outargs[single_ts_size], static_cast<int>(time_basis), 0, num_points, ts_times.data(), ts_tmax.data());
         // Output 3: Tmin (instantaneous)
-        write_time_series_record(&outargs[2 * single_ts_size], 1, 0, num_points, ts_times.data(), ts_tmin.data());
+        write_time_series_record(&outargs[2 * single_ts_size], static_cast<int>(time_basis), 0, num_points, ts_times.data(), ts_tmin.data());
 
-        if (g_step_session.log_file && g_step_session.log_level >= LOG_INFO) {
-            fprintf(g_step_session.log_file,
-                "[CligenWeather] Realization %ld generated: %d points from OLE %.1f to %.1f (Total precip=%.1f %s, avg Tmax=%.1f, avg Tmin=%.1f)\n",
-                real_id, num_points, ts_times.front(), ts_times.back(),
-                std::accumulate(ts_prcp.begin(), ts_prcp.end(), 0.0), (units == 1 ? "in" : "mm"),
-                std::accumulate(ts_tmax.begin(), ts_tmax.end(), 0.0) / num_points,
-                std::accumulate(ts_tmin.begin(), ts_tmin.end(), 0.0) / num_points);
-            fflush(g_step_session.log_file);
+        // Detailed diagnostic logging to both C:\temp\cligen_debug.log and local cligen_debug.log
+        log_cligen("=======================================================================\n");
+        log_cligen(" CLIGEN Time Series Generation — Realization %ld\n", real_id);
+        log_cligen("=======================================================================\n");
+        log_cligen("Raw inargs:  StartTime=%.6f, SimDur=%.6f, TimeStep=%.6f, Real=%ld, Units=%d\n",
+                   raw_start_time, raw_sim_dur, raw_dt, real_id, units);
+        log_cligen("Normalized:  SimDurDays=%.2f, DtDays=%.4f, NumSteps=%d, NumPoints=%d (+%d buffer)\n",
+                   sim_dur_days, dt_days, num_steps, num_points, BUFFER_STEPS);
+        log_cligen("Time Basis:  %s (code=%.0f), t_first=%.1f s (day %.4f), t_last=%.1f s (day %.4f)\n",
+                   is_calendar ? "Calendar" : "Elapsed", time_basis,
+                   ts_times.front(), is_calendar ? (ts_times.front() / SEC_PER_DAY) : ts_times.front(),
+                   ts_times.back(), is_calendar ? (ts_times.back() / SEC_PER_DAY) : ts_times.back());
+        if (is_calendar) {
+            int y1, m1, d1, doy1, y2, m2, d2, doy2;
+            cligen::ole_to_date(ts_times.front() / SEC_PER_DAY, y1, m1, d1, doy1);
+            cligen::ole_to_date(ts_times.back() / SEC_PER_DAY, y2, m2, d2, doy2);
+            log_cligen("Calendar:    Start=%04d-%02d-%02d to End=%04d-%02d-%02d\n",
+                       y1, m1, d1, y2, m2, d2);
         }
+        log_cligen("Output 1 (Precip_Rate) @ outargs[0]:\n");
+        log_cligen("  Header: Format=%.0f, Ver=%.0f, Basis=%.0f, Type=%.0f, Rows=%.0f, Cols=%.0f, Series=%.0f, Pts=%.0f\n",
+                   outargs[0], outargs[1], outargs[2], outargs[3], outargs[4], outargs[5], outargs[6], outargs[7]);
+        log_cligen("  First 3 points: (t=%.1f, v=%.3f), (t=%.1f, v=%.3f), (t=%.1f, v=%.3f)\n",
+                   outargs[8], outargs[8 + num_points],
+                   outargs[9], outargs[8 + num_points + 1],
+                   outargs[10], outargs[8 + num_points + 2]);
+        log_cligen("  Last 3 points:  (t=%.1f, v=%.3f), (t=%.1f, v=%.3f), (t=%.1f, v=%.3f)\n",
+                   outargs[8 + num_points - 3], outargs[8 + 2 * num_points - 3],
+                   outargs[8 + num_points - 2], outargs[8 + 2 * num_points - 2],
+                   outargs[8 + num_points - 1], outargs[8 + 2 * num_points - 1]);
+
+        log_cligen("Output 2 (Tmax) @ outargs[%d]:\n", single_ts_size);
+        log_cligen("  Header: Format=%.0f, Ver=%.0f, Basis=%.0f, Type=%.0f, Rows=%.0f, Cols=%.0f, Series=%.0f, Pts=%.0f\n",
+                   outargs[single_ts_size + 0], outargs[single_ts_size + 1], outargs[single_ts_size + 2],
+                   outargs[single_ts_size + 3], outargs[single_ts_size + 4], outargs[single_ts_size + 5],
+                   outargs[single_ts_size + 6], outargs[single_ts_size + 7]);
+
+        log_cligen("Output 3 (Tmin) @ outargs[%d]:\n", 2 * single_ts_size);
+        log_cligen("  Header: Format=%.0f, Ver=%.0f, Basis=%.0f, Type=%.0f, Rows=%.0f, Cols=%.0f, Series=%.0f, Pts=%.0f\n",
+                   outargs[2 * single_ts_size + 0], outargs[2 * single_ts_size + 1], outargs[2 * single_ts_size + 2],
+                   outargs[2 * single_ts_size + 3], outargs[2 * single_ts_size + 4], outargs[2 * single_ts_size + 5],
+                   outargs[2 * single_ts_size + 6], outargs[2 * single_ts_size + 7]);
+        log_cligen("Total doubles written: %d (offset 0 to %d)\n", total_req_size, total_req_size - 1);
+
+        // Store generated series in memory cache
+        s_cached_ts_output.assign(outargs, outargs + total_req_size);
+        s_cached_real_id = real_id;
         break;
     }
 
     case XF_CLEANUP: {
+        s_cached_real_id = -1;
+        s_cached_ts_output.clear();
         g_step_session.close_log();
         g_step_session.initialized = false;
+        log_cligen("  XF_CLEANUP: closed.\n");
         break;
     }
 
@@ -721,26 +799,32 @@ static void execute_cligen_timeseries(int methodID, int* status,
 // Exported GoldSim Entry Points
 // ===========================================================================
 
-// Primary entry point for GoldSim: Generates complete Time Series once per realization
+// Primary entry point: 112 inputs (4 scalars + 9 monthly 12-item vectors) -> 3 daily scalar outputs
 GS_EXPORT void GS_CALL CligenWeather(int methodID, int* status,
                                      double* inargs, double* outargs) {
-    execute_cligen_timeseries(methodID, status, inargs, outargs);
+    execute_cligen(true, methodID, status, inargs, outargs);
 }
 
-// Explicit alias for Time Series mode
-GS_EXPORT void GS_CALL cligen_weather_ts(int methodID, int* status,
-                                        double* inargs, double* outargs) {
-    execute_cligen_timeseries(methodID, status, inargs, outargs);
+// Alias for 112-input monthly vector spline mode (4 scalars + 9 vectors of 12)
+GS_EXPORT void GS_CALL cligen_weather_step(int methodID, int* status,
+                                           double* inargs, double* outargs) {
+    execute_cligen(true, methodID, status, inargs, outargs);
 }
 
-// Step-by-step array mode (112 inputs: 4 scalars + 9 vectors of 12)
+// Explicit alias for 112-input monthly vector spline mode
 GS_EXPORT void GS_CALL cligen_weather_arrays(int methodID, int* status,
                                             double* inargs, double* outargs) {
     execute_cligen(true, methodID, status, inargs, outargs);
 }
 
-// Step-by-step scalar mode (13 scalar inputs)
-GS_EXPORT void GS_CALL cligen_weather_step(int methodID, int* status,
-                                           double* inargs, double* outargs) {
+// Explicit entry point for GoldSim Time Series Definition mode (113 inputs -> 3 Time Series)
+GS_EXPORT void GS_CALL cligen_weather_ts(int methodID, int* status,
+                                        double* inargs, double* outargs) {
+    execute_cligen_timeseries(methodID, status, inargs, outargs);
+}
+
+// Legacy daily scalar mode (13 scalar inputs)
+GS_EXPORT void GS_CALL cligen_weather_scalar(int methodID, int* status,
+                                             double* inargs, double* outargs) {
     execute_cligen(false, methodID, status, inargs, outargs);
 }

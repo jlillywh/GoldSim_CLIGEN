@@ -41,11 +41,11 @@ dll: dll32 dll64
 dll32: CligenWeather_win32.dll
 CligenWeather_win32.dll: $(ENGINE) $(HEADER)
 	$(CXX32) -O3 -std=c++17 -Wall -shared $(ENGINE) -o $@ -static -Wl,--add-stdcall-alias
-	cp $@ CligenWeather.dll
 
 dll64: CligenWeather_x64.dll
 CligenWeather_x64.dll: $(ENGINE) $(HEADER)
 	$(CXX64) -O3 -std=c++17 -Wall -shared $(ENGINE) -o $@ -static -Wl,--add-stdcall-alias
+	cp $@ CligenWeather.dll
 
 run: cligen_test
 	mkdir -p ../../../bridge_output
