@@ -1,10 +1,19 @@
 # GoldSim - CLIGEN Integration
 
-[![Windows 64-bit](https://img.shields.io/badge/platform-Windows%2064--bit-blue.svg)](https://github.com/jlillywh/GoldSim_CLIGEN)
+[![Latest Release](https://img.shields.io/github/v/release/jlillywh/GoldSim_CLIGEN?label=Download&color=success)](https://github.com/jlillywh/GoldSim_CLIGEN/releases/latest)
+[![Windows 64-bit](https://img.shields.io/badge/platform-Windows%2064--bit-blue.svg)](https://github.com/jlillywh/GoldSim_CLIGEN/releases/latest)
 [![C++17](https://img.shields.io/badge/language-C%2B%2B17-orange.svg)](https://github.com/jlillywh/GoldSim_CLIGEN)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 `CligenWeather.dll` is a compiled C++ implementation of the **CLIGEN** stochastic weather generator that interfaces directly with [GoldSim](https://www.goldsim.com/Web/Home/)'s External (DLL) element to simulate daily weather data (precipitation, $T_{\max}$, and $T_{\min}$) during Monte Carlo simulations.
+
+## Quick Download
+
+Download the pre-compiled DLL and instructions directly from the [**Latest Release**](https://github.com/jlillywh/GoldSim_CLIGEN/releases/latest):
+
+* **[Download `CligenWeather.dll` (64-bit Windows — Recommended)](https://github.com/jlillywh/GoldSim_CLIGEN/releases/latest/download/CligenWeather.dll)**
+* **[Download `CligenWeather_win32.dll` (32-bit Windows)](https://github.com/jlillywh/GoldSim_CLIGEN/releases/latest/download/CligenWeather_win32.dll)**
+* **[Download `GoldSim_CLIGEN_v1.0.0.zip` (All DLLs + Setup Guide)](https://github.com/jlillywh/GoldSim_CLIGEN/releases/latest/download/GoldSim_CLIGEN_v1.0.0.zip)**
 
 ---
 
