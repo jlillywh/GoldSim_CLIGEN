@@ -190,6 +190,103 @@ int main(int argc, char** argv) {
            100.0 * wet_days / n, wet_days, n);
     printf("-----------------------------------------------------------\n");
     printf(" Sanity: p99 should sit near ~37 C (observed), NOT ~66 C (WGEN defect).\n");
+
+    // Verify Time Series mode (CligenWeather) sub-daily parity & diurnal output across 1d, 1h, 15m, 1m
+    std::vector<double> ts_in(113, 0.0);
+    ts_in[0] = 46296.0; // 2026-10-01
+    ts_in[1] = 10.0;    // 10 days
+    ts_in[2] = 1.0;     // 1 day step
+    ts_in[3] = 1.0;     // Realization 1
+    ts_in[4] = 1.0;     // US Customary
+    for (int b = 0; b < 9; ++b) {
+        for (int m = 0; m < 12; ++m) {
+            ts_in[5 + b * 12 + m] = in[4 + b * 12 + m];
+        }
+    }
+
+    std::vector<double> ts_buf(500000, 0.0);
+    CligenWeather(XF_INITIALIZE, &status, nullptr, nullptr);
+    CligenWeather(XF_CALCULATE, &status, ts_in.data(), ts_buf.data());
+    if (status != 0) { fprintf(stderr, "Daily CligenWeather TS failed\n"); return 3; }
+
+    int npts_daily = (int)ts_buf[7];
+    double daily_10d_precip = 0.0;
+    for (int d = 0; d < 10; ++d) {
+        daily_10d_precip += ts_buf[8 + npts_daily + d] * 1.0;
+    }
+    int off_tmax_d = 8 + 2 * npts_daily;
+    int off_tmin_d = 2 * off_tmax_d;
+    double day0_tmax = ts_buf[off_tmax_d + 8 + npts_daily];
+    double day0_tmin = ts_buf[off_tmin_d + 8 + npts_daily];
+
+    // Test 1-minute time step (dt = 1 / 1440 day)
+    ts_in[2] = 1.0 / 1440.0;
+    CligenWeather(XF_CALCULATE, &status, ts_in.data(), ts_buf.data());
+    if (status == -2) {
+        ts_buf.resize((size_t)ts_buf[0] + 1024, 0.0);
+        CligenWeather(XF_CALCULATE, &status, ts_in.data(), ts_buf.data());
+    }
+    if (status != 0) { fprintf(stderr, "1-min CligenWeather TS failed (status=%d)\n", status); return 4; }
+
+    int npts_1m = (int)ts_buf[7];
+    double subdaily_10d_precip = 0.0;
+    for (int k = 0; k < 10 * 1440; ++k) {
+        subdaily_10d_precip += ts_buf[8 + npts_1m + k] * (1.0 / 1440.0);
+    }
+    if (std::fabs(subdaily_10d_precip - daily_10d_precip) > 1e-6) {
+        fprintf(stderr, "Sub-daily 1-min precip total %.6f != daily total %.6f\n",
+                subdaily_10d_precip, daily_10d_precip);
+        return 5;
+    }
+
+    int single_sz_1m = 8 + 2 * npts_1m;
+    double min_d0 = 1e9, max_d0 = -1e9;
+    for (int k = 0; k < 1440; ++k) {
+        double t_hi = ts_buf[single_sz_1m + 8 + npts_1m + k];
+        double t_lo = ts_buf[2 * single_sz_1m + 8 + npts_1m + k];
+        if (std::fabs(t_hi - t_lo) > 1e-12) {
+            fprintf(stderr, "Sub-daily Tmax and Tmin outputs differ at step %d: %.4f vs %.4f\n", k, t_hi, t_lo);
+            return 6;
+        }
+        min_d0 = std::min(min_d0, t_hi);
+        max_d0 = std::max(max_d0, t_hi);
+    }
+    if (std::fabs(min_d0 - day0_tmin) > 1e-3 || std::fabs(max_d0 - day0_tmax) > 1e-3) {
+        fprintf(stderr, "1-min diurnal range [%.3f, %.3f] did not match Day 0 [%.3f, %.3f]\n",
+                min_d0, max_d0, day0_tmin, day0_tmax);
+        return 7;
+    }
+
+    // Verify 500 realizations at 15-min steps (dt = 1/96 day) over 4 days have NO midnight drop
+    ts_in[0] = 46334.0; // Nov 8, 2026
+    ts_in[1] = 4.0;     // 4 days
+    ts_in[2] = 1.0 / 96.0; // 15-min step
+    ts_in[4] = 1.0;     // US Customary (in/d)
+    std::vector<double> max_at_step(4 * 96 + 1, 0.0);
+    std::vector<double> sum_at_step(4 * 96 + 1, 0.0);
+    for (int r = 1; r <= 500; ++r) {
+        ts_in[3] = (double)r;
+        CligenWeather(XF_CALCULATE, &status, ts_in.data(), ts_buf.data());
+        if (status != 0) { fprintf(stderr, "15-min run failed on realization %d\n", r); return 8; }
+        int npts_15m = (int)ts_buf[7];
+        for (int k = 0; k <= 4 * 96; ++k) {
+            double p = ts_buf[8 + npts_15m + k];
+            max_at_step[k] = std::max(max_at_step[k], p);
+            sum_at_step[k] += p;
+        }
+    }
+    for (int day_b = 0; day_b <= 4; ++day_b) {
+        int k_mid = day_b * 96;
+        if (max_at_step[k_mid] < 1.5) {
+            fprintf(stderr, "Midnight drop detected at day boundary %d (step %d): max_rate=%.4f in/d\n",
+                    day_b, k_mid, max_at_step[k_mid]);
+            return 9;
+        }
+    }
+    printf(" Sub-daily 1-min parity verified: 10d precip=%.4f (exact match), Day 0 diurnal=[%.2f, %.2f]\n",
+           subdaily_10d_precip, min_d0, max_d0);
+    printf(" 15-min 500-realization midnight continuity verified: max rates (Days 0..4)=[%.2f, %.2f, %.2f, %.2f, %.2f] in/d\n",
+           max_at_step[0], max_at_step[96], max_at_step[192], max_at_step[288], max_at_step[384]);
     printf("===========================================================\n");
     return 0;
 }

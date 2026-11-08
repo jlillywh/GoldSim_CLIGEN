@@ -208,8 +208,16 @@ namespace {
         bool prev_wet = false;      // wet/dry Markov state carried from yesterday
         double res_tmax = 0.0;      // AR(1) max-temperature residual carried forward
         double res_tmin = 0.0;      // AR(1) min-temperature residual carried forward
+        long active_day_number = -999999999L;
+        cligen::DayWeather cur_day_weather{};
+        cligen::SubdailyStorm cur_day_storm{};
+        double prev_day_tmax = 20.0;
+        double prev_day_prcp = 0.0;
+        cligen::SubdailyStorm prev_day_storm{};
+        bool has_prev_day = false;
         cligen::MonthlyCubicSpline param_spline[NUM_PARAM_BLOCKS];
         std::mt19937_64 rng;
+        std::mt19937_64 subdaily_rng;
         std::normal_distribution<double> norm{0.0, 1.0};
         std::uniform_real_distribution<double> uni{0.0, 1.0};
         LogLevel log_level = LOG_ERROR;
@@ -240,9 +248,18 @@ namespace {
             uint64_t seed = (static_cast<uint64_t>(real_id) * 6364136223846793005ULL + 1442695040888963407ULL) ^ 0x9E3779B97F4A7C15ULL;
             if (seed == 0) seed = 189;
             rng.seed(seed);
+            uint64_t sub_seed = (seed ^ 0xD1B54A32D192ED03ULL) * 0x94D049BB133111EBULL;
+            if (sub_seed == 0) sub_seed = 7919;
+            subdaily_rng.seed(sub_seed);
+            norm.reset();
+            uni.reset();
             prev_wet = false;
             res_tmax = 0.0;
             res_tmin = 0.0;
+            active_day_number = -999999999L;
+            prev_day_prcp = 0.0;
+            prev_day_storm = cligen::SubdailyStorm{};
+            has_prev_day = false;
             log_cligen_info("\n--- Realization %ld (Seed: %llu) ---\n", real_id, (unsigned long long)seed);
         }
     };
@@ -310,7 +327,8 @@ static void execute_cligen(bool array_mode, int methodID, int* status,
         }
 
         const double time_val  = inargs[0]; // GoldSim DateTime run property (preferred) or ETIME
-        const double dt        = (inargs[1] > 0.0) ? inargs[1] : 1.0;
+        const double raw_dt    = (inargs[1] > 0.0) ? inargs[1] : 1.0;
+        const double dt        = (raw_dt > 100.0) ? (raw_dt / 86400.0) : raw_dt;
         const long   real_id   = (inargs[2] >= 1.0) ? static_cast<long>(inargs[2]) : 1;
         const int    units     = (inargs[3] >= 0.5) ? 1 : 0; // 0 = Metric, 1 = US Customary
 
@@ -321,122 +339,142 @@ static void execute_cligen(bool array_mode, int methodID, int* status,
             g_step_session.reset_realization(real_id);
         }
 
-        double pww, pwd, prcp_mean, prcp_sd, prcp_skew;
-        double mean_tmax, sd_tmax, mean_tmin, sd_tmin;
+        const bool is_subdaily = (dt < 0.999);
+        const double dt_hours  = std::max(1.0 / 3600.0, dt * 24.0);
+        const long day_number  = static_cast<long>(std::floor(time_val + 1e-9));
+        const double frac_day  = std::max(0.0, std::min(1.0, time_val - static_cast<double>(day_number)));
+        const double h0        = frac_day * 24.0;
+        const double h1        = std::min(24.0, h0 + dt_hours);
 
-        if (array_mode) {
-            int doy = 1;
-            bool leap = false;
-            if (time_val >= 10000.0) {
-                // GoldSim DateTime run property (OLE automation date, days since 1899-12-30)
-                int year = 0, month = 0, day = 0;
-                cligen::ole_to_date(time_val, year, month, day, doy);
-                leap = cligen::is_leap_year(year);
+        int month_idx = 0;
+        double pww = 0.45, pwd = 0.20, prcp_mean = 6.0, prcp_sd = 7.0, prcp_skew = 2.0;
+        double mean_tmax = 20.0, sd_tmax = 4.0, mean_tmin = 10.0, sd_tmin = 3.5;
+
+        if (!is_subdaily || day_number != g_step_session.active_day_number) {
+            if (array_mode) {
+                int doy = 1;
+                bool leap = false;
+                if (time_val >= 10000.0) {
+                    int year = 0, month = 0, day = 0;
+                    cligen::ole_to_date(static_cast<double>(day_number), year, month, day, doy);
+                    leap = cligen::is_leap_year(year);
+                    month_idx = std::max(0, std::min(11, month - 1));
+                } else {
+                    long day_idx = std::max(0L, day_number);
+                    doy = static_cast<int>((day_idx % 365) + 1);
+                    month_idx = cligen::doy_to_month(doy, false);
+                }
+
+                // Refresh the seasonal splines from the monthly vectors and evaluate today's value
+                const double u = cligen::month_phase(doy, leap);
+                double param[NUM_PARAM_BLOCKS];
+                for (int blk = 0; blk < NUM_PARAM_BLOCKS; ++blk) {
+                    g_step_session.param_spline[blk].set(&inargs[block_offset_step(blk)]);
+                    param[blk] = g_step_session.param_spline[blk].evaluate(u);
+                }
+
+                pww       = std::max(0.01, std::min(0.99, param[BLK_PWW]));
+                pwd       = std::max(0.01, std::min(0.99, param[BLK_PWD]));
+                prcp_mean = param[BLK_MEANP];
+                prcp_sd   = param[BLK_SDP];
+                prcp_skew = std::max(0.0, std::min(4.0, param[BLK_SKEWP]));
+
+                mean_tmax = param[BLK_MTMAX];
+                sd_tmax   = param[BLK_SDTMAX];
+                mean_tmin = param[BLK_MTMIN];
+                sd_tmin   = param[BLK_SDTMIN];
             } else {
-                // Elapsed simulation time ETIME starting from day 0 (Jan 1)
-                long day_idx = static_cast<long>(std::floor(time_val / dt + 0.5));
-                if (day_idx < 0) day_idx = 0;
-                doy = static_cast<int>((day_idx % 365) + 1);
+                // Direct daily scalar inputs
+                pww       = inargs[4];
+                pwd       = inargs[5];
+                prcp_mean = inargs[6];
+                prcp_sd   = inargs[7];
+                prcp_skew = inargs[8];
+
+                mean_tmax = inargs[9];
+                sd_tmax   = inargs[10];
+                mean_tmin = inargs[11];
+                sd_tmin   = inargs[12];
             }
 
-            // Refresh the seasonal splines from the monthly vectors and evaluate today's value
-            const double u = cligen::month_phase(doy, leap);
-            double param[NUM_PARAM_BLOCKS];
-            for (int blk = 0; blk < NUM_PARAM_BLOCKS; ++blk) {
-                g_step_session.param_spline[blk].set(&inargs[block_offset_step(blk)]);
-                param[blk] = g_step_session.param_spline[blk].evaluate(u);
+            cligen::DayClimate climate;
+            climate.pww = pww;
+            climate.pwd = pwd;
+            climate.prcp_mean = prcp_mean;
+            climate.prcp_sd = prcp_sd;
+            climate.prcp_skew = prcp_skew;
+            climate.mean_tmax = mean_tmax;
+            climate.sd_tmax = sd_tmax;
+            climate.mean_tmin = mean_tmin;
+            climate.sd_tmin = sd_tmin;
+            climate.units = units;
+
+            if (g_step_session.has_prev_day) {
+                g_step_session.prev_day_tmax = g_step_session.cur_day_weather.tmax;
+                g_step_session.prev_day_prcp = g_step_session.cur_day_weather.prcp;
+                g_step_session.prev_day_storm = g_step_session.cur_day_storm;
+            } else if (is_subdaily) {
+                // Draw pre-start day (d = -1) on subdaily_rng for cross-midnight spillover at t = 0
+                cligen::DayMemory pre_mem{};
+                std::normal_distribution<double> pre_norm(0.0, 1.0);
+                cligen::DayWeather pre_day = cligen::draw_day(
+                    climate, pre_mem, g_step_session.subdaily_rng, pre_norm, g_step_session.uni);
+                g_step_session.prev_day_tmax = pre_day.tmax;
+                g_step_session.prev_day_prcp = pre_day.prcp;
+                if (pre_day.is_wet && pre_day.prcp > 0.0) {
+                    g_step_session.prev_day_storm = cligen::draw_cligen_storm(
+                        pre_day.prcp, units, month_idx, dt_hours,
+                        g_step_session.subdaily_rng, g_step_session.uni);
+                } else {
+                    g_step_session.prev_day_storm = cligen::SubdailyStorm{};
+                }
             }
 
-            pww       = std::max(0.01, std::min(0.99, param[BLK_PWW]));
-            pwd       = std::max(0.01, std::min(0.99, param[BLK_PWD]));
-            prcp_mean = param[BLK_MEANP];
-            prcp_sd   = param[BLK_SDP];
-            prcp_skew = std::max(0.0, std::min(4.0, param[BLK_SKEWP]));
+            cligen::DayMemory mem;
+            mem.prev_wet = g_step_session.prev_wet;
+            mem.res_tmax = g_step_session.res_tmax;
+            mem.res_tmin = g_step_session.res_tmin;
+            g_step_session.cur_day_weather = cligen::draw_day(
+                climate, mem, g_step_session.rng, g_step_session.norm, g_step_session.uni);
+            g_step_session.prev_wet = mem.prev_wet;
+            g_step_session.res_tmax = mem.res_tmax;
+            g_step_session.res_tmin = mem.res_tmin;
 
-            mean_tmax = param[BLK_MTMAX];
-            sd_tmax   = param[BLK_SDTMAX];
-            mean_tmin = param[BLK_MTMIN];
-            sd_tmin   = param[BLK_SDTMIN];
+            if (!g_step_session.has_prev_day) {
+                if (!is_subdaily) {
+                    g_step_session.prev_day_tmax = g_step_session.cur_day_weather.tmax;
+                }
+                g_step_session.has_prev_day = true;
+            }
+            g_step_session.active_day_number = day_number;
+
+            if (is_subdaily && g_step_session.cur_day_weather.is_wet && g_step_session.cur_day_weather.prcp > 0.0) {
+                g_step_session.cur_day_storm = cligen::draw_cligen_storm(
+                    g_step_session.cur_day_weather.prcp, units, month_idx, dt_hours,
+                    g_step_session.subdaily_rng, g_step_session.uni);
+            } else {
+                g_step_session.cur_day_storm = cligen::SubdailyStorm{};
+            }
+        }
+
+        const cligen::DayWeather& day = g_step_session.cur_day_weather;
+        const bool is_wet = day.is_wet;
+
+        if (!is_subdaily) {
+            outargs[0] = (dt > 0.0) ? (day.prcp / dt) : day.prcp; // Precip_Rate (mm/day or in/day)
+            outargs[1] = day.tmax;                                // Tmax
+            outargs[2] = day.tmin;                                // Tmin
         } else {
-            // Direct daily scalar inputs
-            pww       = inargs[4];
-            pwd       = inargs[5];
-            prcp_mean = inargs[6];
-            prcp_sd   = inargs[7];
-            prcp_skew = inargs[8];
-
-            mean_tmax = inargs[9];
-            sd_tmax   = inargs[10];
-            mean_tmin = inargs[11];
-            sd_tmin   = inargs[12];
+            const double step_depth =
+                cligen::eval_storm_interval_depth(day.prcp, g_step_session.cur_day_storm, h0, h1) +
+                cligen::eval_storm_interval_depth(g_step_session.prev_day_prcp, g_step_session.prev_day_storm, h0 + 24.0, h1 + 24.0);
+            const double step_rate = step_depth / dt;
+            const double t_diurnal = cligen::eval_diurnal_temp(
+                h0, g_step_session.prev_day_tmax, day.tmin, day.tmax, day.tmin);
+            outargs[0] = step_rate;
+            outargs[1] = t_diurnal;
+            outargs[2] = t_diurnal;
         }
-
-        // Sanity floors on variances
-        if (pww <= 0.0 && pwd <= 0.0) {
-            pww = 0.45; pwd = 0.20;
-            prcp_mean = (units == 1) ? 0.25 : 6.0;
-            prcp_sd   = (units == 1) ? 0.30 : 7.0;
-            prcp_skew = 2.0;
-            mean_tmax = (units == 1) ? 68.0 : 20.0;
-            sd_tmax   = (units == 1) ? 7.2  : 4.0;
-            mean_tmin = (units == 1) ? 50.0 : 10.0;
-            sd_tmin   = (units == 1) ? 6.3  : 3.5;
-        }
-        const double min_t_sd = (units == 1) ? (cligen::MIN_TEMP_SD * 1.8) : cligen::MIN_TEMP_SD;
-        const double min_p_sd = (units == 1) ? (cligen::MIN_PRCP_SD / 25.4) : cligen::MIN_PRCP_SD;
-        sd_tmax   = std::max(min_t_sd, sd_tmax);
-        sd_tmin   = std::max(min_t_sd, sd_tmin);
-        prcp_sd   = std::max(min_p_sd, prcp_sd);
-        prcp_mean = std::max((units == 1 ? 0.001 : 0.01), prcp_mean);
-        prcp_skew = std::min(4.0, std::max(0.0, prcp_skew));
-
-        // 1. Wet/Dry Markov Chain Occurrence (uses yesterday's state)
-        double p_trans = g_step_session.prev_wet ? pww : pwd;
-        bool is_wet = g_step_session.uni(g_step_session.rng) < p_trans;
-        g_step_session.prev_wet = is_wet;
-
-        // 2. Temperature Synthesis (bivariate normal with cross-correlation and AR(1) persistence)
-        constexpr double r_cross = 0.65;
-        constexpr double rho_ar1 = 0.60;
-        const double z1 = g_step_session.norm(g_step_session.rng);
-        const double z_ind = g_step_session.norm(g_step_session.rng);
-        const double z2 = r_cross * z1 + std::sqrt(1.0 - r_cross * r_cross) * z_ind;
-
-        const double decay = std::sqrt(1.0 - rho_ar1 * rho_ar1);
-        g_step_session.res_tmax = rho_ar1 * g_step_session.res_tmax + decay * z1;
-        g_step_session.res_tmin = rho_ar1 * g_step_session.res_tmin + decay * z2;
-
-        // Wet/dry temperature conditioning: wet days are cooled relative to dry days
-        // while preserving the unconditional monthly mean (mean_tmax).
-        // Steady-state wet probability from the two-state Markov chain:
-        const double pw = std::max(0.01, std::min(0.99, pwd / std::max(0.01, 1.0 - pww + pwd)));
-        const double delta_t = (units == 1) ? 3.6 : 2.0;
-        // Dry days are raised by pw * delta_t; wet days are lowered by (1 - pw) * delta_t.
-        // Expected value: pw * (mean - (1-pw)*delta) + (1-pw) * (mean + pw*delta) == mean_tmax.
-        const double t_shift = is_wet ? (-(1.0 - pw) * delta_t) : (pw * delta_t);
-        double tmax = mean_tmax + t_shift + sd_tmax * g_step_session.res_tmax;
-        double tmin = mean_tmin + sd_tmin * g_step_session.res_tmin;
-        if (tmin > tmax) std::swap(tmin, tmax);
-
-        // 3. Precipitation Depth (Pearson Type III via Wilson-Hilferty transformation)
-        double prcp = 0.0;
-        if (is_wet) {
-            const double z = g_step_session.norm(g_step_session.rng);
-            if (std::fabs(prcp_skew) < 1e-4) {
-                prcp = prcp_mean + prcp_sd * z;
-            } else {
-                const double inner = 1.0 + (prcp_skew * z) / 6.0 - (prcp_skew * prcp_skew) / 36.0;
-                prcp = prcp_mean + prcp_sd * (2.0 / prcp_skew) * (inner * inner * inner - 1.0);
-            }
-            const double min_prcp = (units == 1) ? 0.004 : 0.1;
-            const double round_factor = (units == 1) ? 10000.0 : 1000.0;
-            prcp = std::max(min_prcp, std::round(prcp * round_factor) / round_factor);
-        }
-
-        // Return the 3 scalar outputs to GoldSim for the current timestep
-        outargs[0] = (dt > 0.0) ? (prcp / dt) : prcp; // Precip_Rate (mm/day or in/day)
-        outargs[1] = tmax;                            // Tmax
-        outargs[2] = tmin;                            // Tmin
 
         g_step_session.step_count++;
         if (g_step_session.log_level >= LOG_DEBUG) {
@@ -526,11 +564,15 @@ static void execute_cligen_timeseries(int methodID, int* status,
                (void*)inargs, (void*)outargs);
 
     static long s_cached_real_id = -1;
+    static double s_cached_dt_days = -1.0;
+    static double s_cached_sim_dur = -1.0;
     static std::vector<double> s_cached_ts_output;
 
     switch (methodID) {
     case XF_INITIALIZE: {
         s_cached_real_id = -1;
+        s_cached_dt_days = -1.0;
+        s_cached_sim_dur = -1.0;
         s_cached_ts_output.clear();
         g_step_session.open_log();
         g_step_session.initialized = true;
@@ -570,8 +612,9 @@ static void execute_cligen_timeseries(int methodID, int* status,
         const int    units          = (inargs[4] >= 0.5) ? 1 : 0; // 0 = Metric, 1 = US Customary
 
         // Auto-detect and normalize units for SimDuration and TimestepLength:
-        double sim_dur_days = (raw_sim_dur > 10000.0) ? (raw_sim_dur / 86400.0) : raw_sim_dur;
-        double dt_days      = (raw_dt > 100.0) ? (raw_dt / 86400.0) : raw_dt;
+        const bool dur_in_seconds = (raw_sim_dur > 10000.0);
+        double sim_dur_days = dur_in_seconds ? (raw_sim_dur / 86400.0) : raw_sim_dur;
+        double dt_days      = (raw_dt > 100.0 || (dur_in_seconds && raw_dt > 1.0)) ? (raw_dt / 86400.0) : raw_dt;
         if (dt_days <= 0.0) dt_days = 1.0;
         if (sim_dur_days <= 0.0) sim_dur_days = 1.0;
 
@@ -593,9 +636,12 @@ static void execute_cligen_timeseries(int methodID, int* status,
         }
 
         // Realization skip guard:
-        // If GoldSim triggers XF_CALCULATE again during the same realization,
+        // If GoldSim triggers XF_CALCULATE again during the same realization with identical settings,
         // instantly return the cached time series without re-running stochastic generation.
-        if (s_cached_real_id == real_id && s_cached_ts_output.size() == static_cast<size_t>(total_req_size)) {
+        if (s_cached_real_id == real_id &&
+            std::fabs(s_cached_dt_days - dt_days) < 1e-12 &&
+            std::fabs(s_cached_sim_dur - sim_dur_days) < 1e-9 &&
+            s_cached_ts_output.size() == static_cast<size_t>(total_req_size)) {
             std::memcpy(outargs, s_cached_ts_output.data(), total_req_size * sizeof(double));
             return;
         }
@@ -628,20 +674,33 @@ static void execute_cligen_timeseries(int methodID, int* status,
         const double time_basis = is_calendar ? 1.0 : 0.0;
         constexpr double SEC_PER_DAY = 86400.0;
 
-        for (int k = 0; k < num_points; ++k) {
-            double cur_day = raw_start_time + k * dt_days;
-            ts_times[k] = is_calendar ? (cur_day * SEC_PER_DAY) : (k * dt_days);
+        const bool is_subdaily = (dt_days < 0.999);
+        const double dt_hours  = std::max(1.0 / 3600.0, dt_days * 24.0);
+        const double start_day_floor = is_calendar ? std::floor(raw_start_time + 1e-12) : 0.0;
+        const double initial_frac_day = is_calendar ? std::max(0.0, raw_start_time - start_day_floor) : 0.0;
+        const int max_day_idx = std::max(0, static_cast<int>(std::floor(initial_frac_day + (num_points - 1) * dt_days + 1e-9)));
+        const int num_sim_days = max_day_idx + 2; // +1 lookahead day for continuous midnight diurnal cooling
 
+        std::vector<cligen::DayWeather> sim_days(num_sim_days);
+        std::vector<cligen::SubdailyStorm> sim_storms(num_sim_days);
+        cligen::DayWeather pre_day{};
+        cligen::SubdailyStorm pre_storm{};
+
+        // 1. Generate daily CLIGEN weather strictly ONCE per calendar day (daily RNG stream)
+        //    and draw sub-daily storm parameters on the isolated subdaily_rng stream.
+        for (int d = 0; d < num_sim_days; ++d) {
             int doy = 1;
+            int month_idx = 0;
             bool leap = false;
             if (is_calendar) {
-                int year = 0, month = 0, day = 0;
-                cligen::ole_to_date(cur_day, year, month, day, doy);
+                int year = 0, month = 0, day_of_m = 0;
+                cligen::ole_to_date(start_day_floor + static_cast<double>(d), year, month, day_of_m, doy);
                 leap = cligen::is_leap_year(year);
+                month_idx = std::max(0, std::min(11, month - 1));
             } else {
-                long day_idx = static_cast<long>(std::floor(cur_day / dt_days + 0.5));
-                if (day_idx < 0) day_idx = 0;
-                doy = static_cast<int>((day_idx % 365) + 1);
+                doy = (d % 365) + 1;
+                leap = false;
+                month_idx = cligen::doy_to_month(doy, false);
             }
 
             const double u = cligen::month_phase(doy, leap);
@@ -650,76 +709,82 @@ static void execute_cligen_timeseries(int methodID, int* status,
                 param[blk] = param_spline[blk].evaluate(u);
             }
 
-            double pww       = std::max(0.01, std::min(0.99, param[BLK_PWW]));
-            double pwd       = std::max(0.01, std::min(0.99, param[BLK_PWD]));
-            double prcp_mean = param[BLK_MEANP];
-            double prcp_sd   = param[BLK_SDP];
-            double prcp_skew = std::max(0.0, std::min(4.0, param[BLK_SKEWP]));
+            cligen::DayClimate climate;
+            climate.pww = std::max(0.01, std::min(0.99, param[BLK_PWW]));
+            climate.pwd = std::max(0.01, std::min(0.99, param[BLK_PWD]));
+            climate.prcp_mean = param[BLK_MEANP];
+            climate.prcp_sd = param[BLK_SDP];
+            climate.prcp_skew = std::max(0.0, std::min(4.0, param[BLK_SKEWP]));
+            climate.mean_tmax = param[BLK_MTMAX];
+            climate.sd_tmax = param[BLK_SDTMAX];
+            climate.mean_tmin = param[BLK_MTMIN];
+            climate.sd_tmin = param[BLK_SDTMIN];
+            climate.units = units;
 
-            double mean_tmax = param[BLK_MTMAX];
-            double sd_tmax   = param[BLK_SDTMAX];
-            double mean_tmin = param[BLK_MTMIN];
-            double sd_tmin   = param[BLK_SDTMIN];
-
-            if (pww <= 0.0 && pwd <= 0.0) {
-                pww = 0.45; pwd = 0.20;
-                prcp_mean = (units == 1) ? 0.25 : 6.0;
-                prcp_sd   = (units == 1) ? 0.30 : 7.0;
-                prcp_skew = 2.0;
-                mean_tmax = (units == 1) ? 68.0 : 20.0;
-                sd_tmax   = (units == 1) ? 7.2  : 4.0;
-                mean_tmin = (units == 1) ? 50.0 : 10.0;
-                sd_tmin   = (units == 1) ? 6.3  : 3.5;
-            }
-            const double min_t_sd = (units == 1) ? (cligen::MIN_TEMP_SD * 1.8) : cligen::MIN_TEMP_SD;
-            const double min_p_sd = (units == 1) ? (cligen::MIN_PRCP_SD / 25.4) : cligen::MIN_PRCP_SD;
-            sd_tmax   = std::max(min_t_sd, sd_tmax);
-            sd_tmin   = std::max(min_t_sd, sd_tmin);
-            prcp_sd   = std::max(min_p_sd, prcp_sd);
-            prcp_mean = std::max((units == 1 ? 0.001 : 0.01), prcp_mean);
-            prcp_skew = std::min(4.0, std::max(0.0, prcp_skew));
-
-            // 1. Wet/Dry Markov chain occurrence
-            double p_trans = prev_wet ? pww : pwd;
-            bool is_wet = g_step_session.uni(g_step_session.rng) < p_trans;
-            prev_wet = is_wet;
-
-            // 2. Temperature residuals (Matalas AR(1))
-            constexpr double r_cross = 0.65;
-            constexpr double rho_ar1 = 0.60;
-            const double z1 = g_step_session.norm(g_step_session.rng);
-            const double z_ind = g_step_session.norm(g_step_session.rng);
-            const double z2 = r_cross * z1 + std::sqrt(1.0 - r_cross * r_cross) * z_ind;
-
-            const double decay = std::sqrt(1.0 - rho_ar1 * rho_ar1);
-            res_tmax = rho_ar1 * res_tmax + decay * z1;
-            res_tmin = rho_ar1 * res_tmin + decay * z2;
-
-            const double pw = std::max(0.01, std::min(0.99, pwd / std::max(0.01, 1.0 - pww + pwd)));
-            const double delta_t = (units == 1) ? 3.6 : 2.0;
-            const double t_shift = is_wet ? (-(1.0 - pw) * delta_t) : (pw * delta_t);
-            double tmax = mean_tmax + t_shift + sd_tmax * res_tmax;
-            double tmin = mean_tmin + sd_tmin * res_tmin;
-            if (tmin > tmax) std::swap(tmin, tmax);
-
-            // 3. Precipitation depth (Pearson Type III via Wilson-Hilferty transformation)
-            double prcp = 0.0;
-            if (is_wet) {
-                const double z = g_step_session.norm(g_step_session.rng);
-                if (std::fabs(prcp_skew) < 1e-4) {
-                    prcp = prcp_mean + prcp_sd * z;
-                } else {
-                    const double inner = 1.0 + (prcp_skew * z) / 6.0 - (prcp_skew * prcp_skew) / 36.0;
-                    prcp = prcp_mean + prcp_sd * (2.0 / prcp_skew) * (inner * inner * inner - 1.0);
+            if (d == 0 && is_subdaily) {
+                // Draw pre-start day (d = -1) on subdaily_rng so storms starting late on Day -1
+                // naturally spill across the initial midnight (t = 0) without perturbing daily rng.
+                cligen::DayMemory pre_mem{};
+                std::normal_distribution<double> pre_norm(0.0, 1.0);
+                pre_day = cligen::draw_day(
+                    climate, pre_mem, g_step_session.subdaily_rng, pre_norm, g_step_session.uni);
+                if (pre_day.is_wet && pre_day.prcp > 0.0) {
+                    pre_storm = cligen::draw_cligen_storm(
+                        pre_day.prcp, units, month_idx, dt_hours,
+                        g_step_session.subdaily_rng, g_step_session.uni);
                 }
-                const double min_prcp = (units == 1) ? 0.004 : 0.1;
-                const double round_factor = (units == 1) ? 10000.0 : 1000.0;
-                prcp = std::max(min_prcp, std::round(prcp * round_factor) / round_factor);
             }
 
-            ts_prcp[k] = (dt_days > 0.0) ? (prcp / dt_days) : prcp; // mm/d or in/d
-            ts_tmax[k] = tmax;                                      // deg C or deg F
-            ts_tmin[k] = tmin;                                      // deg C or deg F
+            cligen::DayMemory mem;
+            mem.prev_wet = prev_wet;
+            mem.res_tmax = res_tmax;
+            mem.res_tmin = res_tmin;
+            sim_days[d] = cligen::draw_day(
+                climate, mem, g_step_session.rng, g_step_session.norm, g_step_session.uni);
+            prev_wet = mem.prev_wet;
+            res_tmax = mem.res_tmax;
+            res_tmin = mem.res_tmin;
+
+            if (is_subdaily && sim_days[d].is_wet && sim_days[d].prcp > 0.0) {
+                sim_storms[d] = cligen::draw_cligen_storm(
+                    sim_days[d].prcp, units, month_idx, dt_hours,
+                    g_step_session.subdaily_rng, g_step_session.uni);
+            }
+        }
+
+        // 2. Populate Time Series output points (daily values when dt >= 1 day;
+        //    CLIGEN double-exponential storm + diurnal temperature on both Tmax & Tmin when dt < 1 day).
+        for (int k = 0; k < num_points; ++k) {
+            const double cur_day = raw_start_time + k * dt_days;
+            ts_times[k] = is_calendar ? (cur_day * SEC_PER_DAY) : (k * dt_days);
+
+            const double rel_days = initial_frac_day + k * dt_days;
+            const int d = std::max(0, std::min(num_sim_days - 2, static_cast<int>(std::floor(rel_days + 1e-9))));
+            const cligen::DayWeather& day = sim_days[d];
+
+            if (!is_subdaily) {
+                ts_prcp[k] = (dt_days > 0.0) ? (day.prcp / dt_days) : day.prcp; // mm/d or in/d
+                ts_tmax[k] = day.tmax;                                          // deg C or deg F
+                ts_tmin[k] = day.tmin;                                          // deg C or deg F
+            } else {
+                const double h0 = std::max(0.0, std::min(24.0, (rel_days - static_cast<double>(d)) * 24.0));
+                const double h1 = std::min(24.0, h0 + dt_hours);
+
+                const double prev_prcp = (d > 0) ? sim_days[d - 1].prcp : pre_day.prcp;
+                const cligen::SubdailyStorm& prev_st = (d > 0) ? sim_storms[d - 1] : pre_storm;
+                const double step_depth =
+                    cligen::eval_storm_interval_depth(day.prcp, sim_storms[d], h0, h1) +
+                    cligen::eval_storm_interval_depth(prev_prcp, prev_st, h0 + 24.0, h1 + 24.0);
+                const double step_rate = step_depth / dt_days;
+
+                const double prev_tmax = (d > 0) ? sim_days[d - 1].tmax : day.tmax;
+                const double next_tmin = sim_days[d + 1].tmin;
+                const double t_diurnal = cligen::eval_diurnal_temp(h0, prev_tmax, day.tmin, day.tmax, next_tmin);
+
+                ts_prcp[k] = step_rate;
+                ts_tmax[k] = t_diurnal;
+                ts_tmin[k] = t_diurnal;
+            }
         }
 
         // Package and write the 3 Time Series Definitions into outargs
@@ -777,11 +842,15 @@ static void execute_cligen_timeseries(int methodID, int* status,
         // Store generated series in memory cache
         s_cached_ts_output.assign(outargs, outargs + total_req_size);
         s_cached_real_id = real_id;
+        s_cached_dt_days = dt_days;
+        s_cached_sim_dur = sim_dur_days;
         break;
     }
 
     case XF_CLEANUP: {
         s_cached_real_id = -1;
+        s_cached_dt_days = -1.0;
+        s_cached_sim_dur = -1.0;
         s_cached_ts_output.clear();
         g_step_session.close_log();
         g_step_session.initialized = false;

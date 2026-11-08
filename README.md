@@ -4,6 +4,8 @@ A standalone, zero-dependency **64-bit native C++17 Windows DLL (`CligenWeather.
 
 To generate the 12-month **CLIGEN parameters** (`PWW`, `PWD`, `Mean_P`, `SD_P`, `Skew_P`, `Mean_Tmax`, `SD_Tmax`, `Mean_Tmin`, `SD_Tmin`) for any project site from historical weather station data (GHCN-Daily, ERA5, or custom CSV/Excel records), use the **[Stochastic Climate Simulator](https://www.lillywhitewater.com/tools/climate-simulator/)** web application on [lillywhitewater.com](https://www.lillywhitewater.com) (see the [User Manual](https://www.lillywhitewater.com/docs/climate-simulator/)).
 
+The daily precipitation and temperature methods follow Nicks, A.D., L.J. Lane, and G.A. Gander (1995), "Weather Generator," Chapter 2 in *USDA-Water Erosion Prediction Project: Hillslope Profile and Watershed Model Documentation*, NSERL Report No. 10, D.C. Flanagan and M.A. Nearing (eds.), USDA-ARS, West Lafayette, IN. [Chapter 2 PDF](https://forest.moscowfsl.wsu.edu/fswepp/docs/cligench2.pdf).
+
 ---
 
 ## Key Features
@@ -70,9 +72,9 @@ Add the **3 Output Arguments** as **Time Series Definitions** in this **exact or
 
 | # | Output ID | Type & Units | Description |
 | :--- | :--- | :--- | :--- |
-| **1** | `Precip_Rate` | `Time Series Definition` (`mm/d` or `in/d`, instantaneous values) | Stochastic daily precipitation rate time series |
-| **2** | `Tmax` | `Time Series Definition` (`C` or `F`, instantaneous values) | Stochastic daily maximum air temperature time series |
-| **3** | `Tmin` | `Time Series Definition` (`C` or `F`, instantaneous values) | Stochastic daily minimum air temperature time series |
+| **1** | `Precip_Rate` | `Time Series Definition` (`mm/d` or `in/d`, instantaneous values) | Daily precipitation rate when `Time_Step = 1 day`; disaggregated CLIGEN double-exponential storm rate when `Time_Step < 1 day` |
+| **2** | `Tmax` | `Time Series Definition` (`C` or `F`, instantaneous values) | Daily maximum temperature when `Time_Step = 1 day`, or continuous sub-daily diurnal temperature when `Time_Step < 1 day` |
+| **3** | `Tmin` | `Time Series Definition` (`C` or `F`, instantaneous values) | Daily minimum temperature when `Time_Step = 1 day`, or continuous sub-daily diurnal temperature (matching `Tmax`) when `Time_Step < 1 day` |
 
 ### 5. Link Downstream Time Series Elements
 Create three **Time Series** elements in GoldSim (`Precip_DLL`, `Tmax_DLL`, `Tmin_DLL`):

@@ -12,6 +12,7 @@
 //   3. Daily Temperatures: 12 monthly maximum/minimum means and daily standard
 //      deviations, conditioned on wet/dry occurrence, with cross-correlation
 //      and lag-1 autoregressive persistence AR(1).
+// The daily draw itself is draw_day(). GoldSim and CligenEngine::step both call it.
 //   4. Sub-Daily Disaggregation: CLIGEN/WEPP double-exponential storm
 //      hyetograph (exact daily mass balance) and Parton & Logan (1981)
 //      diurnal temperature profile.
@@ -224,6 +225,285 @@ inline double month_phase(int doy, bool leap = false) {
     return m + (f - 0.5);                                 // m at mid-month; eval() wraps
 }
 
+// One day's climate, already reduced to scalars (a month, or a spline
+// evaluation for this day-of-year). units: 0 = metric (mm, deg C), 1 = US customary.
+struct DayClimate {
+    double pww = 0.0;
+    double pwd = 0.0;
+    double prcp_mean = 0.0;
+    double prcp_sd = 0.0;
+    double prcp_skew = 0.0;
+    double mean_tmax = 0.0;
+    double sd_tmax = 0.0;
+    double mean_tmin = 0.0;
+    double sd_tmin = 0.0;
+    int units = 0;
+};
+
+// State that has to survive from one day to the next.
+struct DayMemory {
+    bool prev_wet = false;
+    double res_tmax = 0.0;
+    double res_tmin = 0.0;
+};
+
+struct DayWeather {
+    bool is_wet = false;
+    double prcp = 0.0;   // daily depth, same units as prcp_mean (not a rate)
+    double tmax = 0.0;
+    double tmin = 0.0;
+};
+
+// Single daily CLIGEN draw: Markov wet/dry, normal high and low with a
+// mean-preserving wet-day shift, and Pearson Type III wet-day depth.
+// Sanitizes the climate in place. Advances mem and the caller's random stream.
+inline DayWeather draw_day(DayClimate& in, DayMemory& mem,
+                           std::mt19937_64& rng,
+                           std::normal_distribution<double>& norm,
+                           std::uniform_real_distribution<double>& uni,
+                           double r_cross = 0.65,
+                           double rho_ar1 = 0.60) {
+    if (in.pww <= 0.0 && in.pwd <= 0.0) {
+        in.pww = 0.45;
+        in.pwd = 0.20;
+        in.prcp_mean = (in.units == 1) ? 0.25 : 6.0;
+        in.prcp_sd   = (in.units == 1) ? 0.30 : 7.0;
+        in.prcp_skew = 2.0;
+        in.mean_tmax = (in.units == 1) ? 68.0 : 20.0;
+        in.sd_tmax   = (in.units == 1) ? 7.2  : 4.0;
+        in.mean_tmin = (in.units == 1) ? 50.0 : 10.0;
+        in.sd_tmin   = (in.units == 1) ? 6.3  : 3.5;
+    }
+    const double min_t_sd = (in.units == 1) ? (MIN_TEMP_SD * 1.8) : MIN_TEMP_SD;
+    const double min_p_sd = (in.units == 1) ? (MIN_PRCP_SD / 25.4) : MIN_PRCP_SD;
+    in.sd_tmax   = std::max(min_t_sd, in.sd_tmax);
+    in.sd_tmin   = std::max(min_t_sd, in.sd_tmin);
+    in.prcp_sd   = std::max(min_p_sd, in.prcp_sd);
+    in.prcp_mean = std::max((in.units == 1 ? 0.001 : 0.01), in.prcp_mean);
+    in.prcp_skew = std::min(4.0, std::max(0.0, in.prcp_skew));
+
+    const double p_trans = mem.prev_wet ? in.pww : in.pwd;
+    const bool is_wet = uni(rng) < p_trans;
+    mem.prev_wet = is_wet;
+
+    const double z1 = norm(rng);
+    const double z_ind = norm(rng);
+    const double z2 = r_cross * z1 +
+                      std::sqrt(std::max(0.0, 1.0 - r_cross * r_cross)) * z_ind;
+    const double decay = std::sqrt(std::max(0.0, 1.0 - rho_ar1 * rho_ar1));
+    mem.res_tmax = rho_ar1 * mem.res_tmax + decay * z1;
+    mem.res_tmin = rho_ar1 * mem.res_tmin + decay * z2;
+
+    // Wet days run cooler than dry days. The two shifts cancel, so the
+    // unconditional mean of the high stays at mean_tmax.
+    const double pw = std::max(0.01, std::min(0.99, in.pwd / std::max(0.01, 1.0 - in.pww + in.pwd)));
+    const double delta_t = (in.units == 1) ? 3.6 : 2.0;
+    const double t_shift = is_wet ? (-(1.0 - pw) * delta_t) : (pw * delta_t);
+    double tmax = in.mean_tmax + t_shift + in.sd_tmax * mem.res_tmax;
+    double tmin = in.mean_tmin + in.sd_tmin * mem.res_tmin;
+    if (tmin > tmax) std::swap(tmin, tmax);
+
+    double prcp = 0.0;
+    if (is_wet) {
+        const double z = norm(rng);
+        if (std::fabs(in.prcp_skew) < 1e-4) {
+            prcp = in.prcp_mean + in.prcp_sd * z;
+        } else {
+            const double inner = 1.0 + (in.prcp_skew * z) / 6.0 - (in.prcp_skew * in.prcp_skew) / 36.0;
+            prcp = in.prcp_mean + in.prcp_sd * (2.0 / in.prcp_skew) * (inner * inner * inner - 1.0);
+        }
+        const double min_prcp = (in.units == 1) ? 0.004 : 0.1;
+        const double round_factor = (in.units == 1) ? 10000.0 : 1000.0;
+        prcp = std::max(min_prcp, std::round(prcp * round_factor) / round_factor);
+    }
+
+    DayWeather w;
+    w.is_wet = is_wet;
+    w.prcp = prcp;
+    w.tmax = tmax;
+    w.tmin = tmin;
+    return w;
+}
+
+// ---------------------------------------------------------------------------
+// USDA-ARS CLIGEN v5 (cligen.f) Sub-Daily Storm Disaggregation & Diurnal Temp
+// ---------------------------------------------------------------------------
+
+// Monthly mean dimensionless 30-min rainfall ratio wi(mo) = E[R_30 / R] (cligen.f R5MONB)
+constexpr double CLIGEN_DEFAULT_WI[12] = {
+    0.283, 0.283, 0.283, 0.304, 0.329, 0.393,
+    0.486, 0.486, 0.393, 0.329, 0.283, 0.283
+};
+
+// 12-interval cumulative empirical distribution of dimensionless time-to-peak TIMPKD(0..12)
+constexpr double CLIGEN_DEFAULT_TIMPKD[13] = {
+    0.00, 0.08, 0.17, 0.25, 0.35, 0.45, 0.55,
+    0.65, 0.74, 0.82, 0.89, 0.95, 1.00
+};
+
+// cligen.f subroutine DSTG(ai, k7): normalized Gamma PDF rejection sampler
+// f(x) = x^6.28 * exp(6.28 * (1 - x)) with xn1 = 6.28 (B. Yu, 1999)
+inline double cligen_dstg(double ai, std::mt19937_64& rng, std::uniform_real_distribution<double>& uni) {
+    constexpr double xn1 = 6.28;
+    const double xm = std::max(0.02, std::min(0.99, ai));
+    for (int iter = 0; iter < 500; ++iter) {
+        const double x = uni(rng);
+        const double y = uni(rng);
+        const double u = x / xm;
+        if (u <= 0.0) continue;
+        const double f = std::pow(u, xn1) * std::exp(xn1 * (1.0 - u));
+        if (y <= f) return x;
+    }
+    return xm;
+}
+
+// cligen.f subroutine ALPHB(rain, wi, k7): dimensionless 30-min depth fraction r1 = alpha_0.5
+// Bounded below by ab = 0.02083 and above by Arnold & Williams (1989) ajp = 1 - exp(-125 / R_mm).
+inline double cligen_alphb(double rain_mm, double wi_mo, std::mt19937_64& rng, std::uniform_real_distribution<double>& uni) {
+    constexpr double ab = 0.02083;
+    double ajp = 1.0 - ab;
+    if (rain_mm >= 25.4) {
+        ajp = 1.0 - std::exp(-125.0 / rain_mm);
+    }
+    const double wi = std::max(ab, std::min(ajp, wi_mo));
+    const double r = cligen_dstg(wi, rng, uni);
+    return std::max(ab, std::min(ajp, r));
+}
+
+// cligen.f subroutine TIMEPK(timpkd, k10): dimensionless time-to-peak tp in (0.01, 0.99]
+inline double cligen_timepk(std::mt19937_64& rng, std::uniform_real_distribution<double>& uni) {
+    const double r = uni(rng);
+    int i = 1;
+    while (i < 12 && CLIGEN_DEFAULT_TIMPKD[i] < r) {
+        ++i;
+    }
+    const double denom = std::max(1e-6, CLIGEN_DEFAULT_TIMPKD[i] - CLIGEN_DEFAULT_TIMPKD[i - 1]);
+    double x = (static_cast<double>(i) - (CLIGEN_DEFAULT_TIMPKD[i] - r) / denom) / 12.0;
+    if (x <= 0.01) x = 0.01;
+    if (x > 0.99)  x = 0.99;
+    return x;
+}
+
+// Solve WEPP/CLIGEN double-exponential parameter a > 0 from (1 - exp(-a)) / a = 1 / ip
+inline double solve_cligen_double_exp_a(double ip) {
+    const double target_ip = std::max(1.01, std::min(60.0, ip));
+    double a = std::max(0.02, target_ip - 1.0);
+    for (int iter = 0; iter < 16; ++iter) {
+        const double ea = std::exp(-a);
+        const double f = 1.0 - ea - a / target_ip;
+        const double df = ea - 1.0 / target_ip;
+        if (std::fabs(df) < 1e-12) break;
+        const double step = f / df;
+        a = std::max(1e-4, a - step);
+        if (std::fabs(step) < 1e-8) break;
+    }
+    return a;
+}
+
+// Analytical cumulative normalized rainfall depth F(tau) in [0, 1] for WEPP/CLIGEN double-exponential storm
+// Conserves 100% of storm depth: F(0) = 0, F(tp) = tp, F(1) = 1.0.
+inline double cligen_double_exp_cum_fraction(double tau, double tp, double a) {
+    if (tau <= 0.0) return 0.0;
+    if (tau >= 1.0) return 1.0;
+    const double exp_neg_a = std::exp(-a);
+    const double denom = 1.0 - exp_neg_a;
+    if (denom <= 1e-12) return tau;
+    if (tau <= tp) {
+        return tp * (std::exp(a * (tau / tp - 1.0)) - exp_neg_a) / denom;
+    } else {
+        return tp + (1.0 - tp) * (1.0 - std::exp(-a * (tau - tp) / (1.0 - tp))) / denom;
+    }
+}
+
+struct SubdailyStorm {
+    double dur   = 0.0; // storm duration in hours
+    double tp    = 0.5; // dimensionless time-to-peak in (0.01, 0.99]
+    double ip    = 1.5; // peak-to-average intensity ratio
+    double a     = 1.0; // double-exponential shape parameter
+    double start = 0.0; // storm start hour of day in [0, 24)
+};
+
+// Compute rainfall depth (in units of prcp) from storm `st` falling within [t0, t1] (hours from storm day's 00:00).
+// For today's storm on [h0, h1], pass (h0, h1).
+// For yesterday's storm continuing across midnight into today's [h0, h1], pass (h0 + 24.0, h1 + 24.0).
+inline double eval_storm_interval_depth(double prcp, const SubdailyStorm& st, double t0, double t1) {
+    if (prcp <= 0.0 || st.dur <= 0.0 || t1 <= t0) return 0.0;
+    const double s_start = st.start;
+    const double s_end   = s_start + st.dur;
+    const double ov0     = std::max(t0, s_start);
+    const double ov1     = std::min(t1, s_end);
+    if (ov1 <= ov0) return 0.0;
+    const double tau0 = (ov0 - s_start) / st.dur;
+    const double tau1 = (ov1 - s_start) / st.dur;
+    const double frac = std::max(0.0,
+        cligen_double_exp_cum_fraction(tau1, st.tp, st.a) -
+        cligen_double_exp_cum_fraction(tau0, st.tp, st.a));
+    return prcp * frac;
+}
+
+// Draw CLIGEN sub-daily storm parameters (cligen.f DAY_GEN lines 3106-3138) using an isolated RNG stream
+inline SubdailyStorm draw_cligen_storm(double prcp, int units, int month_idx, double dt_hours,
+                                       std::mt19937_64& sub_rng,
+                                       std::uniform_real_distribution<double>& uni) {
+    SubdailyStorm st;
+    if (prcp <= 0.0) return st;
+
+    const int m = std::max(0, std::min(11, month_idx));
+    const double rain_mm = (units == 1) ? (prcp * 25.4) : prcp;
+    const double wi_mo = CLIGEN_DEFAULT_WI[m];
+
+    // 1. Storm duration (hours): dur = 3.99 / (-2 * ln(1 - r1_dur))
+    const double r1_dur = cligen_alphb(rain_mm, wi_mo, sub_rng, uni);
+    const double rl_dur = std::max(0.04166, -2.0 * std::log(std::max(1e-6, 1.0 - r1_dur)));
+    const double raw_dur = std::min(24.0, std::max(dt_hours, 3.99 / rl_dur));
+    const int steps_per_day = std::max(1, static_cast<int>(std::round(24.0 / dt_hours)));
+    const int storm_steps = std::max(1, std::min(steps_per_day, static_cast<int>(std::round(raw_dur / dt_hours))));
+    st.dur = storm_steps * dt_hours;
+
+    // 2. Dimensionless time-to-peak tp in (0.01, 0.99]
+    st.tp = cligen_timepk(sub_rng, uni);
+
+    // 3. Peak-to-average intensity ratio ip (cligen.f DAY_GEN lines 3128-3138)
+    const double r1_peak = cligen_alphb(rain_mm, wi_mo, sub_rng, uni);
+    const double rl_peak = -2.0 * std::log(std::max(1e-6, 1.0 - r1_peak));
+    const double r5p = rain_mm * rl_peak;
+    const double r_avg = rain_mm / std::max(0.0833, st.dur);
+    const double tymax = 152.4 + 9.211 * rain_mm;
+    const double xmav_max = std::max(1.01, tymax / std::max(0.01, r_avg));
+    double ip = r5p / std::max(0.01, r_avg);
+    if (ip > xmav_max) ip = xmav_max;
+    if (ip < 1.01)     ip = 1.01;
+    st.ip = ip;
+    st.a  = solve_cligen_double_exp_a(ip);
+
+    // 4. Storm start hour aligned to sub-daily step grid uniformly across all 24 hours [0, 24).
+    //    Storms with start + dur > 24.0 continue across midnight (00:00) into the next day so
+    //    all hours of the day (including midnight) have identical storm occurrence and peak probability.
+    const int start_step = static_cast<int>(std::floor(uni(sub_rng) * steps_per_day));
+    st.start = std::min(steps_per_day - 1, std::max(0, start_step)) * dt_hours;
+    return st;
+}
+
+// Continuous 3-segment piecewise half-cosine diurnal temperature synthesis across midnight (00:00).
+// Matches simulation_engine.js: Tmin occurs at 03:00 and Tmax occurs at 15:00 with C^1 continuity at 00:00.
+inline double eval_diurnal_temp(double hour_of_day, double prev_tmax, double tmin, double tmax, double next_tmin) {
+    constexpr double PI_VAL = 3.14159265358979323846;
+    const double h = std::max(0.0, std::min(24.0, hour_of_day));
+    if (h < 3.0) {
+        // 00:00 to 03:00: cooling from yesterday's Tmax (at 15:00 yesterday) to today's Tmin (at 03:00)
+        const double tau = (h + 9.0) / 12.0; // in [0.75, 1.0)
+        return tmin + (prev_tmax - tmin) * 0.5 * (1.0 + std::cos(PI_VAL * tau));
+    } else if (h < 15.0) {
+        // 03:00 to 15:00: warming from today's Tmin (at 03:00) to today's Tmax (at 15:00)
+        const double tau = (h - 3.0) / 12.0; // in [0.0, 1.0)
+        return tmin + (tmax - tmin) * 0.5 * (1.0 - std::cos(PI_VAL * tau));
+    } else {
+        // 15:00 to 24:00: cooling from today's Tmax (at 15:00) toward tomorrow's Tmin (at 03:00 tomorrow)
+        const double tau = (h - 15.0) / 12.0; // in [0.0, 0.75]
+        return next_tmin + (tmax - next_tmin) * 0.5 * (1.0 + std::cos(PI_VAL * tau));
+    }
+}
+
 // Full monthly USDA CLIGEN parameter set.
 struct Parameters {
     // 12 months x 5 columns: [P(W|W), P(W|D), Mean_P, SD_P, Skew_P]
@@ -288,52 +568,36 @@ public:
     DayResult step(int month, double warming_delta = 0.0) {
         const int m = std::max(0, std::min(11, month));
 
-        // 1. Wet/dry Markov chain occurrence
-        double p_trans = prev_wet_ ? p_.pww[m] : p_.pwd[m];
-        bool is_wet = uni_(rng_) < p_trans;
-        prev_wet_ = is_wet;
+        DayClimate climate;
+        climate.pww = p_.pww[m];
+        climate.pwd = p_.pwd[m];
+        climate.prcp_mean = p_.prcp_mean[m];
+        climate.prcp_sd = p_.prcp_sd[m];
+        climate.prcp_skew = p_.prcp_skew[m];
+        climate.mean_tmax = p_.mean_tmax[m];
+        climate.sd_tmax = p_.sd_tmax[m];
+        climate.mean_tmin = p_.mean_tmin[m];
+        climate.sd_tmin = p_.sd_tmin[m];
+        climate.units = 0;
 
-        // 2. Daily Temperature Synthesis
-        const double mu_max = is_wet ? (p_.mean_tmax[m] - p_.tmax_wet_depression[m]) : p_.mean_tmax[m];
-        const double sd_max = std::max(MIN_TEMP_SD, p_.sd_tmax[m]);
-        const double mu_min = p_.mean_tmin[m];
-        const double sd_min = std::max(MIN_TEMP_SD, p_.sd_tmin[m]);
+        DayMemory mem;
+        mem.prev_wet = prev_wet_;
+        mem.res_tmax = res_tmax_;
+        mem.res_tmin = res_tmin_;
+        DayWeather day = draw_day(climate, mem, rng_, norm_, uni_, p_.r_cross, p_.rho_ar1);
+        prev_wet_ = mem.prev_wet;
+        res_tmax_ = mem.res_tmax;
+        res_tmin_ = mem.res_tmin;
 
-        // Cross-correlated bivariate normal variates
-        const double z1 = norm_(rng_);
-        const double z_ind = norm_(rng_);
-        const double z2 = p_.r_cross * z1 +
-                          std::sqrt(std::max(0.0, 1.0 - p_.r_cross * p_.r_cross)) * z_ind;
-
-        // Lag-1 autoregressive persistence AR(1)
-        const double decay = std::sqrt(std::max(0.0, 1.0 - p_.rho_ar1 * p_.rho_ar1));
-        res_tmax_ = p_.rho_ar1 * res_tmax_ + decay * z1;
-        res_tmin_ = p_.rho_ar1 * res_tmin_ + decay * z2;
-
-        double tmax = mu_max + sd_max * res_tmax_ + warming_delta;
-        double tmin = mu_min + sd_min * res_tmin_ + warming_delta;
-
-        // Physical inversion swap guard
+        double tmax = day.tmax + warming_delta;
+        double tmin = day.tmin + warming_delta;
         if (tmin > tmax) std::swap(tmin, tmax);
 
-        // 3. Precipitation Depth on Wet Days: Pearson Type III (Wilson-Hilferty)
-        double prcp = 0.0;
+        // Storm shape is only needed for sub-daily disaggregation. The daily
+        // GoldSim outputs do not use it, and it is drawn after the daily weather
+        // so it does not change the precipitation or temperature sequence.
         double s_dur = 0.0, s_tp = 0.0, s_ip = 0.0, s_start = 0.0;
-        if (is_wet) {
-            const double mean = std::max(0.01, p_.prcp_mean[m]);
-            const double sd   = std::max(MIN_PRCP_SD, p_.prcp_sd[m]);
-            const double g    = std::min(4.0, std::max(0.0, p_.prcp_skew[m]));
-            const double z    = norm_(rng_);
-
-            if (std::fabs(g) < 1e-4) {
-                prcp = mean + sd * z;
-            } else {
-                const double inner = 1.0 + (g * z) / 6.0 - (g * g) / 36.0;
-                prcp = mean + sd * (2.0 / g) * (inner * inner * inner - 1.0);
-            }
-            prcp = std::max(0.1, std::round(prcp * 1000.0) / 1000.0);
-
-            // CLIGEN storm descriptors (duration, time-to-peak, peak intensity)
+        if (day.is_wet) {
             const double dmean = std::max(0.25, p_.storm_dur_mean[m]);
             s_dur = -dmean * std::log(std::max(1e-9, uni_(rng_)));
             s_dur = std::min(24.0, std::max(0.25, s_dur));
@@ -354,8 +618,8 @@ public:
         r.tmin = tmin;
         r.tmean = 0.5 * (tmax + tmin);
         r.dtr = tmax - tmin;
-        r.prcp = prcp;
-        r.is_wet = is_wet ? 1.0 : 0.0;
+        r.prcp = day.prcp;
+        r.is_wet = day.is_wet ? 1.0 : 0.0;
         r.is_frost = (tmin <= 0.0) ? 1.0 : 0.0;
         r.is_hot = (tmax >= 32.22) ? 1.0 : 0.0;
         r.mdd = std::max(0.0, r.tmean);
